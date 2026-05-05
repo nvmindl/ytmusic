@@ -17,10 +17,13 @@
 
 const express = require('express');
 const cors    = require('cors');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+const execFileAsync = promisify(execFile);
 
 // ─── Constants (identical to the 8spine module) ───────────────────────────────
 
@@ -49,8 +52,10 @@ const IOS_CONTEXT = {
 // Captured from every WEB_REMIX search response and forwarded to the IOS
 // player to pass YouTube's bot detection — same technique as the 8spine module.
 const VISITOR_DATA_TTL_MS = 20 * 60 * 1000;
+const URL_CACHE_TTL_MS = 10 * 60 * 1000;
 let cachedVisitorData = null;
 let cachedVisitorDataFetchedAt = 0;
+const extractedUrlCache = new Map();
 
 // ─── Helpers (identical logic to the 8spine module) ──────────────────────────
 
@@ -239,6 +244,58 @@ function formatFromMimeType(mimeType = '') {
   return 'aac';
 }
 
+function getCachedExtractedUrl(cacheKey) {
+  const entry = extractedUrlCache.get(cacheKey);
+  if (!entry) return null;
+  if ((Date.now() - entry.createdAt) >= URL_CACHE_TTL_MS) {
+    extractedUrlCache.delete(cacheKey);
+    return null;
+  }
+  return entry.value;
+}
+
+function setCachedExtractedUrl(cacheKey, value) {
+  extractedUrlCache.set(cacheKey, {
+    createdAt: Date.now(),
+    value,
+  });
+}
+
+async function resolveWithYtDlp(videoId, quality = 'high') {
+  const cacheKey = `${videoId}:${quality}`;
+  const cached = getCachedExtractedUrl(cacheKey);
+  if (cached) return cached;
+
+  const formatSelector = quality === 'low'
+    ? 'bestaudio[abr<=128][ext=m4a]/bestaudio[abr<=128]/bestaudio[ext=m4a]/bestaudio'
+    : 'bestaudio[ext=m4a]/bestaudio';
+
+  const { stdout } = await execFileAsync(
+    'python3',
+    [
+      '-m',
+      'yt_dlp',
+      '--no-playlist',
+      '--get-url',
+      '--format',
+      formatSelector,
+      `https://music.youtube.com/watch?v=${videoId}`,
+    ],
+    { timeout: 20000, maxBuffer: 1024 * 1024 }
+  );
+
+  const url = stdout.split(/\r?\n/).map(line => line.trim()).find(Boolean);
+  if (!url) throw new Error('yt-dlp returned no URL');
+
+  const result = {
+    url,
+    format: url.includes('mime=audio%2Fmp4') ? 'm4a' : 'ogg',
+    quality,
+  };
+  setCachedExtractedUrl(cacheKey, result);
+  return result;
+}
+
 async function resolveStream(videoId, quality = 'high', options = {}) {
   const visitorData   = await getVisitorData();
   const clientContext = Object.assign({}, IOS_CONTEXT);
@@ -321,7 +378,12 @@ async function resolveDownload(videoId, quality = '128') {
     };
   } catch (e) {
     console.warn('[YTMusic] Download API unavailable for', videoId, '-', e.message);
-    return resolveStream(videoId, quality === '320' ? 'high' : 'low', { directOnly: true });
+    try {
+      return await resolveStream(videoId, quality === '320' ? 'high' : 'low', { directOnly: true });
+    } catch (streamError) {
+      console.warn('[YTMusic] Direct stream fallback unavailable for', videoId, '-', streamError.message);
+      return resolveWithYtDlp(videoId, quality === '320' ? 'high' : 'low');
+    }
   }
 }
 
@@ -444,8 +506,14 @@ app.get('/stream/:id', async (req, res) => {
     const result = await resolveStream(videoId, quality);
     res.json(result);
   } catch (e) {
-    console.error('[stream]', videoId, e.message);
-    res.status(500).json({ error: e.message });
+    try {
+      const result = await resolveWithYtDlp(videoId, quality);
+      res.json(result);
+    } catch (fallbackError) {
+      console.error('[stream]', videoId, e.message);
+      console.error('[stream-fallback]', videoId, fallbackError.message);
+      res.status(500).json({ error: e.message });
+    }
   }
 });
 
