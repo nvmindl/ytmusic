@@ -18,11 +18,13 @@
 const express = require('express');
 const cors    = require('cors');
 const { execFile } = require('child_process');
+const crypto = require('crypto');
 const { promisify } = require('util');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '256kb' }));
+app.use(express.urlencoded({ extended: false, limit: '256kb' }));
 const execFileAsync = promisify(execFile);
 
 // ─── Constants (identical to the 8spine module) ───────────────────────────────
@@ -53,9 +55,11 @@ const IOS_CONTEXT = {
 // player to pass YouTube's bot detection — same technique as the 8spine module.
 const VISITOR_DATA_TTL_MS = 20 * 60 * 1000;
 const URL_CACHE_TTL_MS = 10 * 60 * 1000;
+const COOKIE_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 let cachedVisitorData = null;
 let cachedVisitorDataFetchedAt = 0;
 const extractedUrlCache = new Map();
+const cookieSessions = new Map();
 
 // ─── Helpers (identical logic to the 8spine module) ──────────────────────────
 
@@ -73,15 +77,131 @@ function getBaseUrl(req) {
 
   const proto = req.get('x-forwarded-proto') || req.protocol;
   const host = req.get('x-forwarded-host') || req.get('host');
-  return `${proto}://${host}`;
+  const prefix = (req.get('x-forwarded-prefix') || '').replace(/\/+$/, '');
+  return `${proto}://${host}${prefix}`;
+}
+
+function getSessionBasePath(req) {
+  return req.cookieSessionId ? `/u/${encodeURIComponent(req.cookieSessionId)}` : '';
 }
 
 function withStreamUrls(req, tracks) {
   const baseUrl = getBaseUrl(req);
+  const sessionBasePath = getSessionBasePath(req);
   return tracks.map(track => ({
     ...track,
-    streamURL: `${baseUrl}/download/${encodeURIComponent(track.id)}`,
+    streamURL: `${baseUrl}${sessionBasePath}/download/${encodeURIComponent(track.id)}`,
   }));
+}
+
+function normalizeCookieHeader(rawCookie) {
+  if (!rawCookie) return '';
+  return String(rawCookie)
+    .replace(/^cookie:\s*/i, '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .join('; ');
+}
+
+function createCookieSession(rawCookie) {
+  const cookie = normalizeCookieHeader(rawCookie);
+  if (!cookie) throw new Error('Cookie is required');
+
+  const id = crypto.randomUUID();
+  cookieSessions.set(id, {
+    cookie,
+    createdAt: Date.now(),
+    lastUsedAt: Date.now(),
+  });
+  return id;
+}
+
+function getCookieSession(id) {
+  if (!id) return null;
+  const session = cookieSessions.get(id);
+  if (!session) return null;
+  if ((Date.now() - session.createdAt) >= COOKIE_SESSION_TTL_MS) {
+    cookieSessions.delete(id);
+    return null;
+  }
+  session.lastUsedAt = Date.now();
+  return session;
+}
+
+function getSessionOptions(req) {
+  return {
+    cookie: req.cookieSession?.cookie || null,
+  };
+}
+
+function requireCookieSession(req, res, next) {
+  const session = getCookieSession(req.params.sessionId);
+  if (!session) {
+    return res.status(404).json({
+      error: 'Cookie session not found or expired. Create a new one at /cookie.',
+    });
+  }
+  req.cookieSessionId = req.params.sessionId;
+  req.cookieSession = session;
+  next();
+}
+
+function manifestResponse(req) {
+  const baseUrl = getBaseUrl(req);
+  const cookiePageUrl = `${baseUrl}/cookie`;
+  const description = req.cookieSessionId
+    ? 'Stream YouTube Music with your private cookie-backed session. This session expires automatically.'
+    : `Stream YouTube Music HLS with refreshed visitor sessions. If playback is blocked, create a cookie-backed install URL at ${cookiePageUrl}.`;
+
+  return {
+    id:          req.cookieSessionId ? `com.nvmindl.eclipse-ytmusic.${req.cookieSessionId}` : 'com.nvmindl.eclipse-ytmusic',
+    name:        'YouTube Music',
+    version:     '4.1.0-eclipse.1',
+    description,
+    icon:        'https://music.youtube.com/img/favicon_144.png',
+    resources:   ['search', 'stream', 'catalog'],
+    types:       ['track', 'album'],
+    contentType: 'music',
+  };
+}
+
+function cookiePageHtml(req, installUrl = '', error = '') {
+  const baseUrl = getBaseUrl(req);
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube Music Cookie Session</title>
+  <style>
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #101114; color: #f5f5f5; }
+    main { width: min(760px, calc(100% - 32px)); margin: 48px auto; }
+    label, textarea, button, input { display: block; width: 100%; box-sizing: border-box; }
+    textarea, input { margin-top: 8px; border: 1px solid #3a3d45; border-radius: 8px; background: #181a20; color: #f5f5f5; padding: 12px; }
+    textarea { min-height: 180px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    button { margin-top: 16px; border: 0; border-radius: 8px; background: #ff355d; color: white; padding: 12px 14px; font-weight: 700; cursor: pointer; }
+    p { color: #c5c7ce; line-height: 1.55; }
+    .result, .error { margin-top: 24px; padding: 16px; border-radius: 8px; }
+    .result { background: #18251d; border: 1px solid #2f6f43; }
+    .error { background: #2a1719; border: 1px solid #8f3440; }
+    code { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>YouTube Music Cookie Session</h1>
+    <p>Paste a YouTube Music cookie to generate a private Eclipse install URL. The cookie is kept in server memory only and expires after 12 hours or when the server restarts.</p>
+    <form method="post" action="${baseUrl}/cookie">
+      <label for="cookie">Cookie header</label>
+      <textarea id="cookie" name="cookie" autocomplete="off" spellcheck="false" placeholder="VISITOR_INFO1_LIVE=...; __Secure-1PSID=..."></textarea>
+      <button type="submit">Create install URL</button>
+    </form>
+    ${installUrl ? `<div class="result"><strong>Install URL</strong><p><code>${installUrl}</code></p></div>` : ''}
+    ${error ? `<div class="error">${error}</div>` : ''}
+  </main>
+</body>
+</html>`;
 }
 
 function bestThumbnail(thumbnails) {
@@ -116,13 +236,14 @@ function parseInfoRuns(runs) {
 
 // ─── Core functions (ported directly from the 8spine module) ─────────────────
 
-async function searchYTMusic(query, limit = 20) {
+async function searchYTMusic(query, limit = 20, options = {}) {
   const headers = {
     'Content-Type': 'application/json',
     'Origin':       YTM_BASE,
     'Referer':      YTM_BASE + '/',
     'User-Agent':   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   };
+  if (options.cookie) headers.Cookie = options.cookie;
 
   const response = await fetch(`${YTM_BASE}/youtubei/v1/search?key=${YTM_API_KEY}`, {
     method: 'POST',
@@ -191,7 +312,8 @@ async function searchYTMusic(query, limit = 20) {
   return tracks;
 }
 
-async function getVisitorData() {
+async function getVisitorData(options = {}) {
+  if (options.cookie) return cachedVisitorData;
   if (cachedVisitorData && (Date.now() - cachedVisitorDataFetchedAt) < VISITOR_DATA_TTL_MS) {
     return cachedVisitorData;
   }
@@ -261,8 +383,8 @@ function setCachedExtractedUrl(cacheKey, value) {
   });
 }
 
-async function resolveWithYtDlp(videoId, quality = 'high') {
-  const cacheKey = `${videoId}:${quality}`;
+async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
+  const cacheKey = `${videoId}:${quality}:${options.cookie ? 'cookie' : 'anon'}`;
   const cached = getCachedExtractedUrl(cacheKey);
   if (cached) return cached;
 
@@ -270,19 +392,40 @@ async function resolveWithYtDlp(videoId, quality = 'high') {
     ? 'bestaudio[abr<=128][ext=m4a]/bestaudio[abr<=128]/bestaudio[ext=m4a]/bestaudio'
     : 'bestaudio[ext=m4a]/bestaudio';
 
-  const { stdout } = await execFileAsync(
-    'python3',
-    [
-      '-m',
-      'yt_dlp',
-      '--no-playlist',
-      '--get-url',
-      '--format',
-      formatSelector,
-      `https://music.youtube.com/watch?v=${videoId}`,
-    ],
-    { timeout: 20000, maxBuffer: 1024 * 1024 }
-  );
+  const ytDlpCommands = [
+    { file: 'yt-dlp', args: [] },
+    { file: 'python3', args: ['-m', 'yt_dlp'] },
+    { file: 'python', args: ['-m', 'yt_dlp'] },
+    { file: 'py', args: ['-m', 'yt_dlp'] },
+  ];
+
+  let stdout = '';
+  let lastError = null;
+  for (const command of ytDlpCommands) {
+    try {
+      const result = await execFileAsync(
+        command.file,
+        [
+          ...command.args,
+          '--no-playlist',
+          '--get-url',
+          '--format',
+          formatSelector,
+          ...(options.cookie ? ['--add-header', `Cookie:${options.cookie}`] : []),
+          `https://music.youtube.com/watch?v=${videoId}`,
+        ],
+        { timeout: 20000, maxBuffer: 1024 * 1024 }
+      );
+      stdout = result.stdout;
+      break;
+    } catch (e) {
+      lastError = e;
+    }
+  }
+
+  if (!stdout && lastError) {
+    throw new Error('yt-dlp unavailable: ' + (lastError.stderr || lastError.message).trim());
+  }
 
   const url = stdout.split(/\r?\n/).map(line => line.trim()).find(Boolean);
   if (!url) throw new Error('yt-dlp returned no URL');
@@ -297,16 +440,23 @@ async function resolveWithYtDlp(videoId, quality = 'high') {
 }
 
 async function resolveStream(videoId, quality = 'high', options = {}) {
-  const visitorData   = await getVisitorData();
+  const visitorData   = await getVisitorData(options);
   const clientContext = Object.assign({}, IOS_CONTEXT);
   if (visitorData) clientContext.visitorData = visitorData;
 
+  const headers = {
+    'Content-Type': 'application/json',
+    'User-Agent':   'com.google.ios.youtube/20.10.01 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)',
+  };
+  if (options.cookie) {
+    headers.Cookie = options.cookie;
+    headers.Origin = YTM_BASE;
+    headers.Referer = YTM_BASE + '/';
+  }
+
   const response = await fetch(`${YTM_BASE}/youtubei/v1/player?prettyPrint=false`, {
     method:  'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'User-Agent':   'com.google.ios.youtube/20.10.01 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)',
-    },
+    headers,
     body: JSON.stringify({
       context:      { client: clientContext },
       videoId,
@@ -359,7 +509,7 @@ async function resolveStream(videoId, quality = 'high', options = {}) {
   throw new Error('No playable audio found for ' + videoId);
 }
 
-async function resolveDownload(videoId, quality = '128') {
+async function resolveDownload(videoId, quality = '128', options = {}) {
   try {
     const response = await fetch(`${DOWNLOAD_API_BASE}${encodeURIComponent(videoId)}?s=5`);
     if (!response.ok) {
@@ -379,21 +529,22 @@ async function resolveDownload(videoId, quality = '128') {
   } catch (e) {
     console.warn('[YTMusic] Download API unavailable for', videoId, '-', e.message);
     try {
-      return await resolveStream(videoId, quality === '320' ? 'high' : 'low', { directOnly: true });
+      return await resolveStream(videoId, quality === '320' ? 'high' : 'low', { ...options, directOnly: true });
     } catch (streamError) {
       console.warn('[YTMusic] Direct stream fallback unavailable for', videoId, '-', streamError.message);
-      return resolveWithYtDlp(videoId, quality === '320' ? 'high' : 'low');
+      return resolveWithYtDlp(videoId, quality === '320' ? 'high' : 'low', options);
     }
   }
 }
 
-async function getAlbum(albumId) {
+async function getAlbum(albumId, options = {}) {
   const headers = {
     'Content-Type': 'application/json',
     'Origin':       YTM_BASE,
     'Referer':      YTM_BASE + '/',
     'User-Agent':   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   };
+  if (options.cookie) headers.Cookie = options.cookie;
 
   const response = await fetch(`${YTM_BASE}/youtubei/v1/browse?key=${YTM_API_KEY}`, {
     method: 'POST',
@@ -465,18 +616,92 @@ async function getAlbum(albumId) {
 
 // ─── Eclipse HTTP endpoints ───────────────────────────────────────────────────
 
+app.get('/cookie', (req, res) => {
+  res.type('html').send(cookiePageHtml(req));
+});
+
+app.post('/cookie', (req, res) => {
+  try {
+    const sessionId = createCookieSession(req.body.cookie);
+    const installUrl = `${getBaseUrl(req)}/u/${encodeURIComponent(sessionId)}/manifest.json`;
+    res.type('html').send(cookiePageHtml(req, installUrl));
+  } catch (e) {
+    res.status(400).type('html').send(cookiePageHtml(req, '', e.message));
+  }
+});
+
+app.use('/u/:sessionId', requireCookieSession);
+
+app.get('/u/:sessionId/manifest.json', (req, res) => {
+  res.json(manifestResponse(req));
+});
+
+app.get('/u/:sessionId/search', async (req, res) => {
+  const query = (req.query.q || '').trim();
+  if (!query) return res.json({ tracks: [] });
+
+  try {
+    const tracks = await searchYTMusic(query, 20);
+    res.json({ tracks: withStreamUrls(req, tracks) });
+  } catch (e) {
+    console.error('[search]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/u/:sessionId/stream/:id', async (req, res) => {
+  const videoId = req.params.id;
+  const quality = (req.query.quality || 'high').toLowerCase();
+  const sessionOptions = getSessionOptions(req);
+
+  try {
+    const result = await resolveStream(videoId, quality, sessionOptions);
+    res.json(result);
+  } catch (e) {
+    try {
+      const result = await resolveWithYtDlp(videoId, quality, sessionOptions);
+      res.json(result);
+    } catch (fallbackError) {
+      console.error('[stream]', videoId, e.message);
+      console.error('[stream-fallback]', videoId, fallbackError.message);
+      res.status(500).json({ error: e.message });
+    }
+  }
+});
+
+app.get('/u/:sessionId/download/:id', async (req, res) => {
+  const videoId = req.params.id;
+  const quality = (req.query.quality || '128').toLowerCase();
+
+  try {
+    const result = await resolveDownload(videoId, quality, getSessionOptions(req));
+    res.redirect(302, result.url);
+  } catch (e) {
+    console.error('[download]', videoId, e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/u/:sessionId/audio/:id', (req, res) => {
+  const quality = req.query.quality ? `?quality=${encodeURIComponent(req.query.quality)}` : '';
+  res.redirect(302, `${getBaseUrl(req)}/u/${encodeURIComponent(req.params.sessionId)}/download/${encodeURIComponent(req.params.id)}${quality}`);
+});
+
+app.get('/u/:sessionId/album/:id', async (req, res) => {
+  const albumId = req.params.id;
+  try {
+    const album = await getAlbum(albumId);
+    album.tracks = withStreamUrls(req, album.tracks);
+    res.json(album);
+  } catch (e) {
+    console.error('[album]', albumId, e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /manifest.json
 app.get('/manifest.json', (req, res) => {
-  res.json({
-    id:          'com.nvmindl.eclipse-ytmusic',
-    name:        'YouTube Music',
-    version:     '4.1.0-eclipse.1',
-    description: 'Stream YouTube Music HLS with refreshed visitor sessions, plus download URLs for Eclipse offline saves.',
-    icon:        'https://music.youtube.com/img/favicon_144.png',
-    resources:   ['search', 'stream', 'catalog'],
-    types:       ['track', 'album'],
-    contentType: 'music',
-  });
+  res.json(manifestResponse(req));
 });
 
 // GET /search?q={query}
