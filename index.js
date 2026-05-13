@@ -32,6 +32,7 @@ const execFileAsync = promisify(execFile);
 const YTM_BASE    = 'https://music.youtube.com';
 const YTM_API_KEY = 'AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30';
 const DOWNLOAD_API_BASE = 'https://capi.y2jar.cc/scr/';
+const PUBLIC_MOUNT_PATHS = ['/ytmusic'];
 
 const WEB_REMIX_CONTEXT = {
   clientName:    'WEB_REMIX',
@@ -77,7 +78,11 @@ function getBaseUrl(req) {
 
   const proto = req.get('x-forwarded-proto') || req.protocol;
   const host = req.get('x-forwarded-host') || req.get('host');
-  const prefix = (req.get('x-forwarded-prefix') || '').replace(/\/+$/, '');
+  const forwardedPrefix = (req.get('x-forwarded-prefix') || '').replace(/\/+$/, '');
+  const detectedPrefix = PUBLIC_MOUNT_PATHS.find(prefix =>
+    req.originalUrl === prefix || req.originalUrl.startsWith(`${prefix}/`)
+  ) || '';
+  const prefix = forwardedPrefix || detectedPrefix;
   return `${proto}://${host}${prefix}`;
 }
 
@@ -616,11 +621,11 @@ async function getAlbum(albumId, options = {}) {
 
 // ─── Eclipse HTTP endpoints ───────────────────────────────────────────────────
 
-app.get('/cookie', (req, res) => {
+app.get(['/cookie', '/ytmusic/cookie'], (req, res) => {
   res.type('html').send(cookiePageHtml(req));
 });
 
-app.post('/cookie', (req, res) => {
+app.post(['/cookie', '/ytmusic/cookie'], (req, res) => {
   try {
     const sessionId = createCookieSession(req.body.cookie);
     const installUrl = `${getBaseUrl(req)}/u/${encodeURIComponent(sessionId)}/manifest.json`;
@@ -630,13 +635,13 @@ app.post('/cookie', (req, res) => {
   }
 });
 
-app.use('/u/:sessionId', requireCookieSession);
+app.use(['/u/:sessionId', '/ytmusic/u/:sessionId'], requireCookieSession);
 
-app.get('/u/:sessionId/manifest.json', (req, res) => {
+app.get(['/u/:sessionId/manifest.json', '/ytmusic/u/:sessionId/manifest.json'], (req, res) => {
   res.json(manifestResponse(req));
 });
 
-app.get('/u/:sessionId/search', async (req, res) => {
+app.get(['/u/:sessionId/search', '/ytmusic/u/:sessionId/search'], async (req, res) => {
   const query = (req.query.q || '').trim();
   if (!query) return res.json({ tracks: [] });
 
@@ -649,7 +654,7 @@ app.get('/u/:sessionId/search', async (req, res) => {
   }
 });
 
-app.get('/u/:sessionId/stream/:id', async (req, res) => {
+app.get(['/u/:sessionId/stream/:id', '/ytmusic/u/:sessionId/stream/:id'], async (req, res) => {
   const videoId = req.params.id;
   const quality = (req.query.quality || 'high').toLowerCase();
   const sessionOptions = getSessionOptions(req);
@@ -669,7 +674,7 @@ app.get('/u/:sessionId/stream/:id', async (req, res) => {
   }
 });
 
-app.get('/u/:sessionId/download/:id', async (req, res) => {
+app.get(['/u/:sessionId/download/:id', '/ytmusic/u/:sessionId/download/:id'], async (req, res) => {
   const videoId = req.params.id;
   const quality = (req.query.quality || '128').toLowerCase();
 
@@ -682,12 +687,12 @@ app.get('/u/:sessionId/download/:id', async (req, res) => {
   }
 });
 
-app.get('/u/:sessionId/audio/:id', (req, res) => {
+app.get(['/u/:sessionId/audio/:id', '/ytmusic/u/:sessionId/audio/:id'], (req, res) => {
   const quality = req.query.quality ? `?quality=${encodeURIComponent(req.query.quality)}` : '';
   res.redirect(302, `${getBaseUrl(req)}/u/${encodeURIComponent(req.params.sessionId)}/download/${encodeURIComponent(req.params.id)}${quality}`);
 });
 
-app.get('/u/:sessionId/album/:id', async (req, res) => {
+app.get(['/u/:sessionId/album/:id', '/ytmusic/u/:sessionId/album/:id'], async (req, res) => {
   const albumId = req.params.id;
   try {
     const album = await getAlbum(albumId);
@@ -700,12 +705,12 @@ app.get('/u/:sessionId/album/:id', async (req, res) => {
 });
 
 // GET /manifest.json
-app.get('/manifest.json', (req, res) => {
+app.get(['/manifest.json', '/ytmusic/manifest.json'], (req, res) => {
   res.json(manifestResponse(req));
 });
 
 // GET /search?q={query}
-app.get('/search', async (req, res) => {
+app.get(['/search', '/ytmusic/search'], async (req, res) => {
   const query = (req.query.q || '').trim();
   if (!query) return res.json({ tracks: [] });
 
@@ -722,7 +727,7 @@ app.get('/search', async (req, res) => {
 // Eclipse calls this at play time AND when saving for offline.
 // Returns { url, format, quality } — Eclipse downloads the audio file
 // and caches it locally; offline playback needs no addon server.
-app.get('/stream/:id', async (req, res) => {
+app.get(['/stream/:id', '/ytmusic/stream/:id'], async (req, res) => {
   const videoId = req.params.id;
   // Quality from query param: ?quality=low|high|lossless (default: high)
   const quality = (req.query.quality || 'high').toLowerCase();
@@ -746,7 +751,7 @@ app.get('/stream/:id', async (req, res) => {
 // Track-level streamURL targets this endpoint so Eclipse can save tracks
 // offline. The updated 8spine module uses y2jar for downloadable files, while
 // /stream/:id stays on YouTube Music HLS for playback.
-app.get('/download/:id', async (req, res) => {
+app.get(['/download/:id', '/ytmusic/download/:id'], async (req, res) => {
   const videoId = req.params.id;
   const quality = (req.query.quality || '128').toLowerCase();
 
@@ -760,15 +765,15 @@ app.get('/download/:id', async (req, res) => {
 });
 
 // Backward-compatible alias for tracks returned by earlier local builds.
-app.get('/audio/:id', (req, res) => {
+app.get(['/audio/:id', '/ytmusic/audio/:id'], (req, res) => {
   const quality = req.query.quality ? `?quality=${encodeURIComponent(req.query.quality)}` : '';
-  res.redirect(302, `/download/${encodeURIComponent(req.params.id)}${quality}`);
+  res.redirect(302, `${getBaseUrl(req)}/download/${encodeURIComponent(req.params.id)}${quality}`);
 });
 
 // GET /album/:browseId
 // Eclipse calls this when a user taps an album in search results.
 // Returns full track listing; Eclipse can bulk-save for offline.
-app.get('/album/:id', async (req, res) => {
+app.get(['/album/:id', '/ytmusic/album/:id'], async (req, res) => {
   const albumId = req.params.id;
   try {
     const album = await getAlbum(albumId);
@@ -781,10 +786,10 @@ app.get('/album/:id', async (req, res) => {
 });
 
 // Root info
-app.get('/', (req, res) => {
+app.get(['/', '/ytmusic'], (req, res) => {
   res.json({
     addon:   'Eclipse YouTube Music Addon',
-    install: 'Open Eclipse → Settings → Connections → Add Addon → paste: http://localhost:3000/manifest.json',
+    install: `Open Eclipse → Settings → Connections → Add Addon → paste: ${getBaseUrl(req)}/manifest.json`,
     docs:    'https://eclipsemusic.app/docs',
   });
 });
