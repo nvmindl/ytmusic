@@ -57,10 +57,14 @@ const IOS_CONTEXT = {
 const VISITOR_DATA_TTL_MS = 20 * 60 * 1000;
 const URL_CACHE_TTL_MS = 10 * 60 * 1000;
 const COOKIE_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const PLAYER_TIMEOUT_MS = 5000;
+const DOWNLOAD_API_TIMEOUT_MS = 6000;
+const YT_DLP_UNAVAILABLE_TTL_MS = 5 * 60 * 1000;
 let cachedVisitorData = null;
 let cachedVisitorDataFetchedAt = 0;
 const extractedUrlCache = new Map();
 const cookieSessions = new Map();
+let ytDlpUnavailableUntil = 0;
 
 // ─── Helpers (identical logic to the 8spine module) ──────────────────────────
 
@@ -416,6 +420,9 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
   const cacheKey = `${videoId}:${quality}:${options.cookie ? 'cookie' : 'anon'}`;
   const cached = getCachedExtractedUrl(cacheKey);
   if (cached) return cached;
+  if (Date.now() < ytDlpUnavailableUntil) {
+    throw new Error('yt-dlp unavailable');
+  }
 
   const formatSelector = quality === 'low'
     ? 'bestaudio[abr<=128][ext=m4a]/bestaudio[abr<=128]/bestaudio[ext=m4a]/bestaudio'
@@ -443,7 +450,7 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
           ...(options.cookie ? ['--add-header', `Cookie:${options.cookie}`] : []),
           `https://music.youtube.com/watch?v=${videoId}`,
         ],
-        { timeout: 10000, maxBuffer: 1024 * 1024 }
+        { timeout: 5000, maxBuffer: 1024 * 1024 }
       );
       stdout = result.stdout;
       break;
@@ -453,6 +460,7 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
   }
 
   if (!stdout && lastError) {
+    ytDlpUnavailableUntil = Date.now() + YT_DLP_UNAVAILABLE_TTL_MS;
     throw new Error('yt-dlp unavailable: ' + (lastError.stderr || lastError.message).trim());
   }
 
@@ -492,7 +500,7 @@ async function resolveStream(videoId, quality = 'high', options = {}) {
   const response = await fetch(`${YTM_BASE}/youtubei/v1/player?prettyPrint=false`, {
     method:  'POST',
     headers,
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(PLAYER_TIMEOUT_MS),
     body: JSON.stringify({
       context:      { client: clientContext },
       videoId,
@@ -567,7 +575,7 @@ async function resolveDownload(videoId, quality = '128', options = {}) {
 
   try {
     const response = await fetch(`${DOWNLOAD_API_BASE}${encodeURIComponent(videoId)}?s=5`, {
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(DOWNLOAD_API_TIMEOUT_MS),
     });
     if (!response.ok) {
       throw new Error('HTTP ' + response.status);
