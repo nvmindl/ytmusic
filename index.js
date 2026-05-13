@@ -22,6 +22,7 @@ const crypto = require('crypto');
 const fs = require('fs/promises');
 const os = require('os');
 const path = require('path');
+const { Readable } = require('stream');
 const { promisify } = require('util');
 
 const app = express();
@@ -59,6 +60,7 @@ const IOS_CONTEXT = {
 // player to pass YouTube's bot detection — same technique as the 8spine module.
 const VISITOR_DATA_TTL_MS = 20 * 60 * 1000;
 const URL_CACHE_TTL_MS = 10 * 60 * 1000;
+const PROXY_URL_TTL_MS = 20 * 60 * 1000;
 const COOKIE_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const PLAYER_TIMEOUT_MS = 5000;
 const DOWNLOAD_API_TIMEOUT_MS = 6000;
@@ -66,6 +68,7 @@ const YT_DLP_UNAVAILABLE_TTL_MS = 5 * 60 * 1000;
 let cachedVisitorData = null;
 let cachedVisitorDataFetchedAt = 0;
 const extractedUrlCache = new Map();
+const proxiedUrlCache = new Map();
 const cookieSessions = new Map();
 let ytDlpUnavailableUntil = 0;
 
@@ -422,6 +425,70 @@ function setCachedExtractedUrl(cacheKey, value) {
   });
 }
 
+function setProxiedUrl(value) {
+  const token = crypto.randomUUID();
+  proxiedUrlCache.set(token, {
+    createdAt: Date.now(),
+    value,
+  });
+  return token;
+}
+
+function getProxiedUrl(token) {
+  const entry = proxiedUrlCache.get(token);
+  if (!entry) return null;
+  if ((Date.now() - entry.createdAt) >= PROXY_URL_TTL_MS) {
+    proxiedUrlCache.delete(token);
+    return null;
+  }
+  return entry.value;
+}
+
+function proxiedPlaybackResult(req, result) {
+  const token = setProxiedUrl(result);
+  const sessionBasePath = getSessionBasePath(req);
+  return {
+    ...result,
+    url: `${getBaseUrl(req)}${sessionBasePath}/proxy/${encodeURIComponent(token)}`,
+  };
+}
+
+async function proxyAudioResponse(req, res, result) {
+  const upstreamHeaders = {};
+  if (req.headers.range) upstreamHeaders.Range = req.headers.range;
+
+  const upstream = await fetch(result.url, { headers: upstreamHeaders });
+  if (!upstream.ok && upstream.status !== 206) {
+    res.status(upstream.status).send(await upstream.text().catch(() => 'Upstream audio failed'));
+    return;
+  }
+
+  res.status(upstream.status);
+  const passthroughHeaders = [
+    'content-type',
+    'content-length',
+    'accept-ranges',
+    'content-range',
+    'cache-control',
+    'last-modified',
+    'etag',
+  ];
+  for (const header of passthroughHeaders) {
+    const value = upstream.headers.get(header);
+    if (value) res.setHeader(header, value);
+  }
+  if (!upstream.headers.get('content-type') && result.contentType) {
+    res.setHeader('Content-Type', result.contentType);
+  }
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  if (!upstream.body) {
+    res.end();
+    return;
+  }
+  Readable.fromWeb(upstream.body).pipe(res);
+}
+
 function cookieHeaderToNetscape(cookieHeader) {
   const rows = ['# Netscape HTTP Cookie File'];
   const cookies = cookieHeader
@@ -765,15 +832,18 @@ app.get(['/u/:sessionId/stream/:id', '/ytmusic/u/:sessionId/stream/:id'], async 
   const sessionOptions = getSessionOptions(req);
 
   try {
-    const result = await resolveStream(videoId, quality, sessionOptions);
-    res.json(result);
+    const result = await resolveStream(videoId, quality, {
+      ...sessionOptions,
+      directOnly: true,
+    });
+    res.json(proxiedPlaybackResult(req, result));
   } catch (e) {
     try {
       const result = await resolveDownload(videoId, quality === 'high' ? '320' : '128', {
         ...sessionOptions,
         skipStream: true,
       });
-      res.json(result);
+      res.json(proxiedPlaybackResult(req, result));
     } catch (fallbackError) {
       console.error('[stream]', videoId, e.message);
       console.error('[stream-download-fallback]', videoId, fallbackError.message);
@@ -787,11 +857,26 @@ app.get(['/u/:sessionId/download/:id', '/ytmusic/u/:sessionId/download/:id'], as
   const quality = (req.query.quality || '128').toLowerCase();
 
   try {
-    const result = await resolveDownload(videoId, quality, getSessionOptions(req));
-    res.redirect(302, result.url);
+    const result = await resolveDownload(videoId, quality, {
+      ...getSessionOptions(req),
+      directOnly: true,
+    });
+    await proxyAudioResponse(req, res, result);
   } catch (e) {
     console.error('[download]', videoId, e.message);
     res.status(500).json({ error: e.message });
+  }
+});
+
+app.get(['/u/:sessionId/proxy/:token', '/ytmusic/u/:sessionId/proxy/:token'], async (req, res) => {
+  const result = getProxiedUrl(req.params.token);
+  if (!result) return res.status(404).json({ error: 'Audio URL expired. Press play again.' });
+
+  try {
+    await proxyAudioResponse(req, res, result);
+  } catch (e) {
+    console.error('[proxy]', e.message);
+    res.status(502).json({ error: e.message });
   }
 });
 
@@ -841,14 +926,14 @@ app.get(['/stream/:id', '/ytmusic/stream/:id'], async (req, res) => {
   const quality = (req.query.quality || 'high').toLowerCase();
 
   try {
-    const result = await resolveStream(videoId, quality);
-    res.json(result);
+    const result = await resolveStream(videoId, quality, { directOnly: true });
+    res.json(proxiedPlaybackResult(req, result));
   } catch (e) {
     try {
       const result = await resolveDownload(videoId, quality === 'high' ? '320' : '128', {
         skipStream: true,
       });
-      res.json(result);
+      res.json(proxiedPlaybackResult(req, result));
     } catch (fallbackError) {
       console.error('[stream]', videoId, e.message);
       console.error('[stream-download-fallback]', videoId, fallbackError.message);
@@ -866,11 +951,23 @@ app.get(['/download/:id', '/ytmusic/download/:id'], async (req, res) => {
   const quality = (req.query.quality || '128').toLowerCase();
 
   try {
-    const result = await resolveDownload(videoId, quality);
-    res.redirect(302, result.url);
+    const result = await resolveDownload(videoId, quality, { directOnly: true });
+    await proxyAudioResponse(req, res, result);
   } catch (e) {
     console.error('[download]', videoId, e.message);
     res.status(500).json({ error: e.message });
+  }
+});
+
+app.get(['/proxy/:token', '/ytmusic/proxy/:token'], async (req, res) => {
+  const result = getProxiedUrl(req.params.token);
+  if (!result) return res.status(404).json({ error: 'Audio URL expired. Press play again.' });
+
+  try {
+    await proxyAudioResponse(req, res, result);
+  } catch (e) {
+    console.error('[proxy]', e.message);
+    res.status(502).json({ error: e.message });
   }
 });
 
