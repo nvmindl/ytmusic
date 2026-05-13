@@ -664,11 +664,19 @@ async function getAlbum(albumId, options = {}) {
 
 // ─── Eclipse HTTP endpoints ───────────────────────────────────────────────────
 
-app.get(['/cookie', '/ytmusic/cookie'], (req, res) => {
+app.get('/cookie', (req, res) => {
+  res.redirect(302, `${getBaseUrl(req)}/ytmusic/cookie`);
+});
+
+app.post('/cookie', (req, res) => {
+  res.redirect(307, `${getBaseUrl(req)}/ytmusic/cookie`);
+});
+
+app.get('/ytmusic/cookie', (req, res) => {
   res.type('html').send(cookiePageHtml(req));
 });
 
-app.post(['/cookie', '/ytmusic/cookie'], (req, res) => {
+app.post('/ytmusic/cookie', (req, res) => {
   try {
     const sessionId = createCookieSession(req.body.cookie);
     const installUrl = `${getBaseUrl(req)}/u/${encodeURIComponent(sessionId)}/manifest.json`;
