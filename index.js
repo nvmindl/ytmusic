@@ -89,7 +89,10 @@ function getBaseUrl(req) {
   const detectedPrefix = PUBLIC_MOUNT_PATHS.find(prefix =>
     req.originalUrl === prefix || req.originalUrl.startsWith(`${prefix}/`)
   ) || '';
-  const prefix = forwardedPrefix || detectedPrefix;
+  const proxyStrippedPrefix = proto === 'https' && host === 'nvmindl.duckdns.org'
+    ? PUBLIC_MOUNT_PATHS[0]
+    : '';
+  const prefix = forwardedPrefix || detectedPrefix || proxyStrippedPrefix;
   return `${proto}://${host}${prefix}`;
 }
 
