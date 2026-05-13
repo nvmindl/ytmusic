@@ -419,7 +419,7 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
           ...(options.cookie ? ['--add-header', `Cookie:${options.cookie}`] : []),
           `https://music.youtube.com/watch?v=${videoId}`,
         ],
-        { timeout: 20000, maxBuffer: 1024 * 1024 }
+        { timeout: 10000, maxBuffer: 1024 * 1024 }
       );
       stdout = result.stdout;
       break;
@@ -462,6 +462,7 @@ async function resolveStream(videoId, quality = 'high', options = {}) {
   const response = await fetch(`${YTM_BASE}/youtubei/v1/player?prettyPrint=false`, {
     method:  'POST',
     headers,
+    signal: AbortSignal.timeout(10000),
     body: JSON.stringify({
       context:      { client: clientContext },
       videoId,
@@ -518,9 +519,10 @@ async function resolveDownload(videoId, quality = '128', options = {}) {
   const streamQuality = quality === '320' ? 'high' : 'low';
 
   // Prefer URLs tied directly to the requested YouTube Music video so we
-  // don't accidentally return mismatched third-party audio.
+  // don't accidentally return mismatched third-party audio. For playback,
+  // HLS is fine here and often more reliable than direct adaptive audio.
   try {
-    return await resolveStream(videoId, streamQuality, { ...options, directOnly: true });
+    return await resolveStream(videoId, streamQuality, options);
   } catch (streamError) {
     console.warn('[YTMusic] Direct stream unavailable for', videoId, '-', streamError.message);
   }
