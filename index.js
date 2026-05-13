@@ -221,7 +221,7 @@ function cookiePageHtml(req, installUrl = '', error = '') {
   <main>
     <h1>YouTube Music Cookie Session</h1>
     <p>Paste a YouTube Music cookie to generate a private Eclipse install URL. The cookie is kept in server memory only and expires after 12 hours or when the server restarts.</p>
-    <form method="post" action="${baseUrl}/cookie">
+    <form method="post" action="cookie">
       <label for="cookie">Cookie header</label>
       <textarea id="cookie" name="cookie" autocomplete="off" spellcheck="false" placeholder="VISITOR_INFO1_LIVE=...; __Secure-1PSID=..."></textarea>
       <button type="submit">Create install URL</button>
