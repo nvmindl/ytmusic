@@ -515,6 +515,22 @@ async function resolveStream(videoId, quality = 'high', options = {}) {
 }
 
 async function resolveDownload(videoId, quality = '128', options = {}) {
+  const streamQuality = quality === '320' ? 'high' : 'low';
+
+  // Prefer URLs tied directly to the requested YouTube Music video so we
+  // don't accidentally return mismatched third-party audio.
+  try {
+    return await resolveStream(videoId, streamQuality, { ...options, directOnly: true });
+  } catch (streamError) {
+    console.warn('[YTMusic] Direct stream unavailable for', videoId, '-', streamError.message);
+  }
+
+  try {
+    return await resolveWithYtDlp(videoId, streamQuality, options);
+  } catch (ytDlpError) {
+    console.warn('[YTMusic] yt-dlp fallback unavailable for', videoId, '-', ytDlpError.message);
+  }
+
   try {
     const response = await fetch(`${DOWNLOAD_API_BASE}${encodeURIComponent(videoId)}?s=5`);
     if (!response.ok) {
@@ -529,16 +545,11 @@ async function resolveDownload(videoId, quality = '128', options = {}) {
     return {
       url: data.downloadUrl,
       format: 'mp3',
-      quality: quality === '320' ? 'high' : 'low',
+      quality: streamQuality,
     };
-  } catch (e) {
-    console.warn('[YTMusic] Download API unavailable for', videoId, '-', e.message);
-    try {
-      return await resolveStream(videoId, quality === '320' ? 'high' : 'low', { ...options, directOnly: true });
-    } catch (streamError) {
-      console.warn('[YTMusic] Direct stream fallback unavailable for', videoId, '-', streamError.message);
-      return resolveWithYtDlp(videoId, quality === '320' ? 'high' : 'low', options);
-    }
+  } catch (downloadError) {
+    console.warn('[YTMusic] Download API unavailable for', videoId, '-', downloadError.message);
+    throw downloadError;
   }
 }
 
