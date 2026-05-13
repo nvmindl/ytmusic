@@ -707,11 +707,11 @@ app.get(['/u/:sessionId/stream/:id', '/ytmusic/u/:sessionId/stream/:id'], async 
     res.json(result);
   } catch (e) {
     try {
-      const result = await resolveWithYtDlp(videoId, quality, sessionOptions);
+      const result = await resolveDownload(videoId, quality === 'high' ? '320' : '128', sessionOptions);
       res.json(result);
     } catch (fallbackError) {
       console.error('[stream]', videoId, e.message);
-      console.error('[stream-fallback]', videoId, fallbackError.message);
+      console.error('[stream-download-fallback]', videoId, fallbackError.message);
       res.status(500).json({ error: e.message });
     }
   }
@@ -780,11 +780,11 @@ app.get(['/stream/:id', '/ytmusic/stream/:id'], async (req, res) => {
     res.json(result);
   } catch (e) {
     try {
-      const result = await resolveWithYtDlp(videoId, quality);
+      const result = await resolveDownload(videoId, quality === 'high' ? '320' : '128');
       res.json(result);
     } catch (fallbackError) {
       console.error('[stream]', videoId, e.message);
-      console.error('[stream-fallback]', videoId, fallbackError.message);
+      console.error('[stream-download-fallback]', videoId, fallbackError.message);
       res.status(500).json({ error: e.message });
     }
   }
