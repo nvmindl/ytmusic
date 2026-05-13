@@ -446,12 +446,14 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
 
 async function resolveStream(videoId, quality = 'high', options = {}) {
   const visitorData   = await getVisitorData(options);
-  const clientContext = Object.assign({}, IOS_CONTEXT);
+  const clientContext = Object.assign({}, options.cookie ? WEB_REMIX_CONTEXT : IOS_CONTEXT);
   if (visitorData) clientContext.visitorData = visitorData;
 
   const headers = {
     'Content-Type': 'application/json',
-    'User-Agent':   'com.google.ios.youtube/20.10.01 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)',
+    'User-Agent': options.cookie
+      ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      : 'com.google.ios.youtube/20.10.01 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)',
   };
   if (options.cookie) {
     headers.Cookie = options.cookie;
