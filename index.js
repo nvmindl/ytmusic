@@ -112,6 +112,9 @@ function normalizeCookieHeader(rawCookie) {
 function createCookieSession(rawCookie) {
   const cookie = normalizeCookieHeader(rawCookie);
   if (!cookie) throw new Error('Cookie is required');
+  if (!/[A-Za-z0-9_.-]+=/.test(cookie)) {
+    throw new Error('Paste the full browser Cookie header, not a single token. It should contain name=value pairs separated by semicolons.');
+  }
 
   const id = crypto.randomUUID();
   cookieSessions.set(id, {
