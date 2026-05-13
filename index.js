@@ -551,10 +551,12 @@ async function resolveDownload(videoId, quality = '128', options = {}) {
   // Prefer URLs tied directly to the requested YouTube Music video so we
   // don't accidentally return mismatched third-party audio. For playback,
   // HLS is fine here and often more reliable than direct adaptive audio.
-  try {
-    return await resolveStream(videoId, streamQuality, options);
-  } catch (streamError) {
-    console.warn('[YTMusic] Direct stream unavailable for', videoId, '-', streamError.message);
+  if (!options.skipStream) {
+    try {
+      return await resolveStream(videoId, streamQuality, options);
+    } catch (streamError) {
+      console.warn('[YTMusic] Direct stream unavailable for', videoId, '-', streamError.message);
+    }
   }
 
   try {
@@ -564,7 +566,9 @@ async function resolveDownload(videoId, quality = '128', options = {}) {
   }
 
   try {
-    const response = await fetch(`${DOWNLOAD_API_BASE}${encodeURIComponent(videoId)}?s=5`);
+    const response = await fetch(`${DOWNLOAD_API_BASE}${encodeURIComponent(videoId)}?s=5`, {
+      signal: AbortSignal.timeout(6000),
+    });
     if (!response.ok) {
       throw new Error('HTTP ' + response.status);
     }
@@ -707,7 +711,10 @@ app.get(['/u/:sessionId/stream/:id', '/ytmusic/u/:sessionId/stream/:id'], async 
     res.json(result);
   } catch (e) {
     try {
-      const result = await resolveDownload(videoId, quality === 'high' ? '320' : '128', sessionOptions);
+      const result = await resolveDownload(videoId, quality === 'high' ? '320' : '128', {
+        ...sessionOptions,
+        skipStream: true,
+      });
       res.json(result);
     } catch (fallbackError) {
       console.error('[stream]', videoId, e.message);
@@ -780,7 +787,9 @@ app.get(['/stream/:id', '/ytmusic/stream/:id'], async (req, res) => {
     res.json(result);
   } catch (e) {
     try {
-      const result = await resolveDownload(videoId, quality === 'high' ? '320' : '128');
+      const result = await resolveDownload(videoId, quality === 'high' ? '320' : '128', {
+        skipStream: true,
+      });
       res.json(result);
     } catch (fallbackError) {
       console.error('[stream]', videoId, e.message);
