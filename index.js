@@ -109,6 +109,27 @@ function normalizeCookieHeader(rawCookie) {
     .join('; ');
 }
 
+function getCookieValue(cookieHeader, name) {
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = String(cookieHeader || '').match(new RegExp(`(?:^|;\\s*)${escapedName}=([^;]+)`));
+  return match ? decodeURIComponent(match[1]) : '';
+}
+
+function getSapisidAuthHeader(cookieHeader, origin) {
+  const sapisid =
+    getCookieValue(cookieHeader, 'SAPISID') ||
+    getCookieValue(cookieHeader, '__Secure-1PAPISID') ||
+    getCookieValue(cookieHeader, '__Secure-3PAPISID');
+  if (!sapisid) return '';
+
+  const timestamp = Math.floor(Date.now() / 1000);
+  const hash = crypto
+    .createHash('sha1')
+    .update(`${timestamp} ${sapisid} ${origin}`)
+    .digest('hex');
+  return `SAPISIDHASH ${timestamp}_${hash}`;
+}
+
 function createCookieSession(rawCookie) {
   const cookie = normalizeCookieHeader(rawCookie);
   if (!cookie) throw new Error('Cookie is required');
@@ -462,6 +483,10 @@ async function resolveStream(videoId, quality = 'high', options = {}) {
     headers.Cookie = options.cookie;
     headers.Origin = YTM_BASE;
     headers.Referer = YTM_BASE + '/';
+    headers['X-Origin'] = YTM_BASE;
+    headers['X-Goog-AuthUser'] = '0';
+    const authHeader = getSapisidAuthHeader(options.cookie, YTM_BASE);
+    if (authHeader) headers.Authorization = authHeader;
   }
 
   const response = await fetch(`${YTM_BASE}/youtubei/v1/player?prettyPrint=false`, {
