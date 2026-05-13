@@ -19,6 +19,8 @@ const express = require('express');
 const cors    = require('cors');
 const { execFile } = require('child_process');
 const crypto = require('crypto');
+const fs = require('fs/promises');
+const os = require('os');
 const path = require('path');
 const { promisify } = require('util');
 
@@ -417,6 +419,38 @@ function setCachedExtractedUrl(cacheKey, value) {
   });
 }
 
+function cookieHeaderToNetscape(cookieHeader) {
+  const rows = ['# Netscape HTTP Cookie File'];
+  const cookies = cookieHeader
+    .split(';')
+    .map(part => part.trim())
+    .filter(Boolean)
+    .map(part => {
+      const index = part.indexOf('=');
+      if (index <= 0) return null;
+      return {
+        name: part.slice(0, index).trim(),
+        value: part.slice(index + 1).trim(),
+      };
+    })
+    .filter(cookie => cookie && cookie.name && cookie.value);
+
+  for (const domain of ['.youtube.com', '.google.com']) {
+    for (const cookie of cookies) {
+      rows.push([domain, 'TRUE', '/', 'TRUE', '0', cookie.name, cookie.value].join('\t'));
+    }
+  }
+
+  return rows.join('\n') + '\n';
+}
+
+async function writeTempYtDlpCookieFile(cookieHeader) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ytmusic-cookies-'));
+  const file = path.join(dir, 'cookies.txt');
+  await fs.writeFile(file, cookieHeaderToNetscape(cookieHeader), { mode: 0o600 });
+  return { dir, file };
+}
+
 async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
   const cacheKey = `${videoId}:${quality}:${options.cookie ? 'cookie' : 'anon'}`;
   const cached = getCachedExtractedUrl(cacheKey);
@@ -439,31 +473,42 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
 
   let stdout = '';
   let lastError = null;
-  for (const command of ytDlpCommands) {
-    try {
-      const result = await execFileAsync(
-        command.file,
-        [
-          ...command.args,
-          '--no-playlist',
-          '--get-url',
-          '--format',
-          formatSelector,
-          ...(options.cookie ? ['--add-header', `Cookie:${options.cookie}`] : []),
-          `https://music.youtube.com/watch?v=${videoId}`,
-        ],
-        { timeout: 5000, maxBuffer: 1024 * 1024 }
-      );
-      stdout = result.stdout;
-      break;
-    } catch (e) {
-      lastError = e;
+  const cookieTemp = options.cookie ? await writeTempYtDlpCookieFile(options.cookie) : null;
+  try {
+    for (const command of ytDlpCommands) {
+      try {
+        const result = await execFileAsync(
+          command.file,
+          [
+            ...command.args,
+            '--no-playlist',
+            '--get-url',
+            '--format',
+            formatSelector,
+            ...(cookieTemp ? ['--cookies', cookieTemp.file] : []),
+            `https://music.youtube.com/watch?v=${videoId}`,
+          ],
+          { timeout: options.cookie ? 15000 : 5000, maxBuffer: 1024 * 1024 }
+        );
+        stdout = result.stdout;
+        break;
+      } catch (e) {
+        lastError = e;
+      }
+    }
+  } finally {
+    if (cookieTemp) {
+      await fs.rm(cookieTemp.dir, { recursive: true, force: true }).catch(() => {});
     }
   }
 
   if (!stdout && lastError) {
-    ytDlpUnavailableUntil = Date.now() + YT_DLP_UNAVAILABLE_TTL_MS;
-    throw new Error('yt-dlp unavailable: ' + (lastError.stderr || lastError.message).trim());
+    const message = (lastError.stderr || lastError.message).trim();
+    if (message.includes('ENOENT') || message.includes('No module named yt_dlp')) {
+      ytDlpUnavailableUntil = Date.now() + YT_DLP_UNAVAILABLE_TTL_MS;
+      throw new Error('yt-dlp unavailable: ' + message);
+    }
+    throw new Error('yt-dlp failed: ' + message);
   }
 
   const url = stdout.split(/\r?\n/).map(line => line.trim()).find(Boolean);
