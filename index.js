@@ -19,6 +19,7 @@ const express = require('express');
 const cors    = require('cors');
 const { execFile } = require('child_process');
 const crypto = require('crypto');
+const path = require('path');
 const { promisify } = require('util');
 
 const app = express();
@@ -429,6 +430,7 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
     : 'bestaudio[ext=m4a]/bestaudio';
 
   const ytDlpCommands = [
+    { file: path.join(__dirname, 'bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'), args: [] },
     { file: 'yt-dlp', args: [] },
     { file: 'python3', args: ['-m', 'yt_dlp'] },
     { file: 'python', args: ['-m', 'yt_dlp'] },
