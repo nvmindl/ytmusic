@@ -616,6 +616,9 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
           command.file,
           [
             ...command.args,
+            ...(process.platform !== 'win32' && fsSync.existsSync('/usr/bin/node')
+              ? ['--js-runtimes', 'node:/usr/bin/node']
+              : []),
             '--no-playlist',
             '--get-url',
             '--format',
