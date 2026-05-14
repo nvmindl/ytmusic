@@ -134,12 +134,7 @@ function getSessionBasePath(req) {
 }
 
 function withStreamUrls(req, tracks) {
-  const baseUrl = getBaseUrl(req);
-  const sessionBasePath = getSessionBasePath(req);
-  return tracks.map(track => ({
-    ...track,
-    streamURL: `${baseUrl}${sessionBasePath}/download/${encodeURIComponent(track.id)}`,
-  }));
+  return tracks;
 }
 
 function normalizeCookieHeader(rawCookie) {
@@ -486,6 +481,17 @@ function proxiedPlaybackResult(req, result) {
   };
 }
 
+function streamProxyResult(req, videoId, duration = 0) {
+  const sessionBasePath = getSessionBasePath(req);
+  return {
+    url: `${getBaseUrl(req)}${sessionBasePath}/stream-proxy/${encodeURIComponent(videoId)}.m4a`,
+    format: 'm4a',
+    quality: '128kbps',
+    duration,
+    durationMs: duration ? duration * 1000 : 0,
+  };
+}
+
 async function proxyAudioResponse(req, res, result) {
   const upstreamHeaders = {};
   if (req.headers.range) upstreamHeaders.Range = req.headers.range;
@@ -520,6 +526,32 @@ async function proxyAudioResponse(req, res, result) {
     return;
   }
   Readable.fromWeb(upstream.body).pipe(res);
+}
+
+async function streamProxyAudio(req, res, videoId, options = {}) {
+  try {
+    const result = await resolveStream(videoId, 'high', {
+      ...options,
+      directOnly: true,
+    });
+    await proxyAudioResponse(req, res, result);
+  } catch (streamError) {
+    try {
+      const result = await resolveDownload(videoId, '128', {
+        ...options,
+        skipStream: true,
+      });
+      await proxyAudioResponse(req, res, result);
+    } catch (fallbackError) {
+      console.error('[stream-proxy]', videoId, streamError.message);
+      console.error('[stream-proxy-fallback]', videoId, fallbackError.message);
+      res.status(500).json({ error: fallbackError.message });
+    }
+  }
+}
+
+function getProxyVideoId(rawId = '') {
+  return rawId.replace(/\.m4a$/i, '');
 }
 
 function cookieHeaderToNetscape(cookieHeader) {
@@ -865,28 +897,11 @@ app.get(['/u/:sessionId/search', '/ytmusic/u/:sessionId/search'], async (req, re
 
 app.get(['/u/:sessionId/stream/:id', '/ytmusic/u/:sessionId/stream/:id'], async (req, res) => {
   const videoId = req.params.id;
-  const quality = (req.query.quality || 'high').toLowerCase();
-  const sessionOptions = getSessionOptions(req);
+  res.json(streamProxyResult(req, videoId));
+});
 
-  try {
-    const result = await resolveStream(videoId, quality, {
-      ...sessionOptions,
-      directOnly: true,
-    });
-    res.json(proxiedPlaybackResult(req, result));
-  } catch (e) {
-    try {
-      const result = await resolveDownload(videoId, quality === 'high' ? '320' : '128', {
-        ...sessionOptions,
-        skipStream: true,
-      });
-      res.json(proxiedPlaybackResult(req, result));
-    } catch (fallbackError) {
-      console.error('[stream]', videoId, e.message);
-      console.error('[stream-download-fallback]', videoId, fallbackError.message);
-      res.status(500).json({ error: e.message });
-    }
-  }
+app.get(['/u/:sessionId/stream-proxy/:id', '/ytmusic/u/:sessionId/stream-proxy/:id'], async (req, res) => {
+  await streamProxyAudio(req, res, getProxyVideoId(req.params.id), getSessionOptions(req));
 });
 
 app.get(['/u/:sessionId/download/:id', '/ytmusic/u/:sessionId/download/:id'], async (req, res) => {
@@ -959,24 +974,11 @@ app.get(['/search', '/ytmusic/search'], async (req, res) => {
 // and caches it locally; offline playback needs no addon server.
 app.get(['/stream/:id', '/ytmusic/stream/:id'], async (req, res) => {
   const videoId = req.params.id;
-  // Quality from query param: ?quality=low|high|lossless (default: high)
-  const quality = (req.query.quality || 'high').toLowerCase();
+  res.json(streamProxyResult(req, videoId));
+});
 
-  try {
-    const result = await resolveStream(videoId, quality, { directOnly: true });
-    res.json(proxiedPlaybackResult(req, result));
-  } catch (e) {
-    try {
-      const result = await resolveDownload(videoId, quality === 'high' ? '320' : '128', {
-        skipStream: true,
-      });
-      res.json(proxiedPlaybackResult(req, result));
-    } catch (fallbackError) {
-      console.error('[stream]', videoId, e.message);
-      console.error('[stream-download-fallback]', videoId, fallbackError.message);
-      res.status(500).json({ error: e.message });
-    }
-  }
+app.get(['/stream-proxy/:id', '/ytmusic/stream-proxy/:id'], async (req, res) => {
+  await streamProxyAudio(req, res, getProxyVideoId(req.params.id));
 });
 
 // GET /download/:videoId
