@@ -537,7 +537,7 @@ async function streamProxyAudio(req, res, videoId, options = {}) {
     await proxyAudioResponse(req, res, result);
   } catch (streamError) {
     try {
-      const result = await resolveDownload(videoId, '128', {
+      const result = await resolveDownload(videoId, '320', {
         ...options,
         skipStream: true,
       });
