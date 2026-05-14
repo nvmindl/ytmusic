@@ -477,18 +477,21 @@ function proxiedPlaybackResult(req, result) {
   const sessionBasePath = getSessionBasePath(req);
   return {
     ...result,
-    url: `${getBaseUrl(req)}${sessionBasePath}/proxy/${encodeURIComponent(token)}`,
+    url: `${getBaseUrl(req)}${sessionBasePath}/stream-proxy-token/${encodeURIComponent(token)}.m4a`,
   };
 }
 
-function streamProxyResult(req, videoId, duration = 0) {
-  const sessionBasePath = getSessionBasePath(req);
+async function resolvePlaybackForEclipse(req, videoId, options = {}) {
+  const result = await resolveDownload(videoId, '320', {
+    ...options,
+    skipStream: true,
+  });
   return {
-    url: `${getBaseUrl(req)}${sessionBasePath}/stream-proxy/${encodeURIComponent(videoId)}.m4a`,
+    ...proxiedPlaybackResult(req, result),
     format: 'm4a',
-    quality: '128kbps',
-    duration,
-    durationMs: duration ? duration * 1000 : 0,
+    quality: result.quality || '128kbps',
+    duration: result.duration || 0,
+    durationMs: result.durationMs || (result.duration ? result.duration * 1000 : 0),
   };
 }
 
@@ -900,11 +903,29 @@ app.get(['/u/:sessionId/search', '/ytmusic/u/:sessionId/search'], async (req, re
 
 app.get(['/u/:sessionId/stream/:id', '/ytmusic/u/:sessionId/stream/:id'], async (req, res) => {
   const videoId = req.params.id;
-  res.json(streamProxyResult(req, videoId));
+  try {
+    res.json(await resolvePlaybackForEclipse(req, videoId, getSessionOptions(req)));
+  } catch (e) {
+    console.error('[stream]', videoId, e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get(['/u/:sessionId/stream-proxy/:id', '/ytmusic/u/:sessionId/stream-proxy/:id'], async (req, res) => {
   await streamProxyAudio(req, res, getProxyVideoId(req.params.id), getSessionOptions(req));
+});
+
+app.get(['/u/:sessionId/stream-proxy-token/:token', '/ytmusic/u/:sessionId/stream-proxy-token/:token'], async (req, res) => {
+  const token = getProxyVideoId(req.params.token);
+  const result = getProxiedUrl(token);
+  if (!result) return res.status(404).json({ error: 'Audio URL expired. Press play again.' });
+
+  try {
+    await proxyAudioResponse(req, res, result);
+  } catch (e) {
+    console.error('[stream-proxy-token]', e.message);
+    res.status(502).json({ error: e.message });
+  }
 });
 
 app.get(['/u/:sessionId/download/:id', '/ytmusic/u/:sessionId/download/:id'], async (req, res) => {
@@ -977,11 +998,29 @@ app.get(['/search', '/ytmusic/search'], async (req, res) => {
 // and caches it locally; offline playback needs no addon server.
 app.get(['/stream/:id', '/ytmusic/stream/:id'], async (req, res) => {
   const videoId = req.params.id;
-  res.json(streamProxyResult(req, videoId));
+  try {
+    res.json(await resolvePlaybackForEclipse(req, videoId));
+  } catch (e) {
+    console.error('[stream]', videoId, e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get(['/stream-proxy/:id', '/ytmusic/stream-proxy/:id'], async (req, res) => {
   await streamProxyAudio(req, res, getProxyVideoId(req.params.id));
+});
+
+app.get(['/stream-proxy-token/:token', '/ytmusic/stream-proxy-token/:token'], async (req, res) => {
+  const token = getProxyVideoId(req.params.token);
+  const result = getProxiedUrl(token);
+  if (!result) return res.status(404).json({ error: 'Audio URL expired. Press play again.' });
+
+  try {
+    await proxyAudioResponse(req, res, result);
+  } catch (e) {
+    console.error('[stream-proxy-token]', e.message);
+    res.status(502).json({ error: e.message });
+  }
 });
 
 // GET /download/:videoId
