@@ -20,6 +20,7 @@ const cors    = require('cors');
 const { execFile } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs/promises');
+const fsSync = require('fs');
 const os = require('os');
 const path = require('path');
 const { Readable } = require('stream');
@@ -37,6 +38,7 @@ const YTM_BASE    = 'https://music.youtube.com';
 const YTM_API_KEY = 'AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30';
 const DOWNLOAD_API_BASE = 'https://capi.y2jar.cc/scr/';
 const PUBLIC_MOUNT_PATHS = ['/ytmusic'];
+const COOKIE_SESSION_FILE = process.env.COOKIE_SESSION_FILE || path.join(__dirname, '.cookie-sessions.json');
 
 const WEB_REMIX_CONTEXT = {
   clientName:    'WEB_REMIX',
@@ -71,6 +73,34 @@ const extractedUrlCache = new Map();
 const proxiedUrlCache = new Map();
 const cookieSessions = new Map();
 let ytDlpUnavailableUntil = 0;
+
+function saveCookieSessions() {
+  const sessions = {};
+  for (const [id, session] of cookieSessions.entries()) {
+    sessions[id] = session;
+  }
+
+  const tmpFile = `${COOKIE_SESSION_FILE}.tmp`;
+  fsSync.writeFileSync(tmpFile, JSON.stringify(sessions), { mode: 0o600 });
+  fsSync.renameSync(tmpFile, COOKIE_SESSION_FILE);
+}
+
+function loadCookieSessions() {
+  try {
+    if (!fsSync.existsSync(COOKIE_SESSION_FILE)) return;
+    const sessions = JSON.parse(fsSync.readFileSync(COOKIE_SESSION_FILE, 'utf8'));
+    for (const [id, session] of Object.entries(sessions)) {
+      if (!session?.cookie || !session?.createdAt) continue;
+      if ((Date.now() - session.createdAt) < COOKIE_SESSION_TTL_MS) {
+        cookieSessions.set(id, session);
+      }
+    }
+  } catch (e) {
+    console.warn('[cookie-session] Could not load saved sessions:', e.message);
+  }
+}
+
+loadCookieSessions();
 
 // ─── Helpers (identical logic to the 8spine module) ──────────────────────────
 
@@ -156,6 +186,7 @@ function createCookieSession(rawCookie) {
     createdAt: Date.now(),
     lastUsedAt: Date.now(),
   });
+  saveCookieSessions();
   return id;
 }
 
@@ -165,9 +196,11 @@ function getCookieSession(id) {
   if (!session) return null;
   if ((Date.now() - session.createdAt) >= COOKIE_SESSION_TTL_MS) {
     cookieSessions.delete(id);
+    saveCookieSessions();
     return null;
   }
   session.lastUsedAt = Date.now();
+  saveCookieSessions();
   return session;
 }
 
@@ -564,6 +597,10 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
         break;
       } catch (e) {
         lastError = e;
+        const message = (e.stderr || e.message || '').trim();
+        if (!message.includes('ENOENT') && !message.includes('No module named yt_dlp')) {
+          break;
+        }
       }
     }
   } finally {
