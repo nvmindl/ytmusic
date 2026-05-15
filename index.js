@@ -773,13 +773,28 @@ function pickDirectAudioFormat(formats, quality) {
 
   if (directFormats.length === 0) return null;
 
+  const bitrate = format => Number(format.bitrate || format.averageBitrate || 0);
+  const isMp4 = format => format.mimeType?.startsWith('audio/mp4') ? 1 : 0;
+
+  if (quality !== 'low') {
+    const itag140 = directFormats.find(format => Number(format.itag) === 140 && isMp4(format));
+    if (itag140) return itag140;
+  }
+
   directFormats.sort((a, b) => {
-    const aIsMp4 = a.mimeType?.startsWith('audio/mp4') ? 1 : 0;
-    const bIsMp4 = b.mimeType?.startsWith('audio/mp4') ? 1 : 0;
-    return (bIsMp4 - aIsMp4) || ((b.bitrate || 0) - (a.bitrate || 0));
+    const aIsMp4 = isMp4(a);
+    const bIsMp4 = isMp4(b);
+    if (aIsMp4 !== bIsMp4) return bIsMp4 - aIsMp4;
+
+    if (quality === 'low') {
+      return bitrate(a) - bitrate(b);
+    }
+
+    const target = 128000;
+    return Math.abs(bitrate(a) - target) - Math.abs(bitrate(b) - target);
   });
   return quality === 'low'
-    ? directFormats[directFormats.length - 1]
+    ? directFormats[0]
     : directFormats[0];
 }
 
@@ -974,11 +989,12 @@ function warmDirectAudio(videoId, options = {}) {
 
 function warmDirectAudioForTracks(tracks, options = {}, limit = 10) {
   if (!Array.isArray(tracks) || !(options.cookie || options.refreshToken || options.accessToken)) return;
-  setTimeout(() => {
-    for (const track of tracks.slice(0, limit)) {
+  for (const [index, track] of tracks.slice(0, limit).entries()) {
+    const delay = index < 3 ? 0 : (index - 2) * 600;
+    setTimeout(() => {
       warmDirectAudio(track.id, options);
-    }
-  }, 0);
+    }, delay);
+  }
 }
 
 function proxiedPlaybackResult(req, result) {
