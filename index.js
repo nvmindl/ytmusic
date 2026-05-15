@@ -158,8 +158,14 @@ function getSessionBasePath(req) {
 
 function withStreamUrls(req, tracks) {
   const options = req.cookieSession ? getSessionOptions(req) : {};
+  const hlsOptions = process.env.HLS_USE_ACCOUNT_AUTH === '1'
+    ? options
+    : {
+      hl: options.hl,
+      gl: options.gl,
+    };
   return tracks.map(track => {
-    const hls = track.id ? getCachedStreamResolution(getPlaybackCacheKey(track.id, options, 'hls')) : null;
+    const hls = track.id ? getCachedStreamResolution(getPlaybackCacheKey(track.id, hlsOptions, 'hls')) : null;
     if (!hls?.url) return track;
     return {
       ...track,
@@ -1026,13 +1032,19 @@ function warmProxyAudio(videoId, options = {}) {
 }
 
 async function resolveHlsAudio(videoId, options = {}) {
-  const cacheKey = getPlaybackCacheKey(videoId, options, 'hls');
+  const playerOptions = process.env.HLS_USE_ACCOUNT_AUTH === '1'
+    ? options
+    : {
+      hl: options.hl,
+      gl: options.gl,
+    };
+  const cacheKey = getPlaybackCacheKey(videoId, playerOptions, 'hls');
   const cached = getCachedStreamResolution(cacheKey);
   if (cached) return cached;
   if (streamResolutionInflight.has(cacheKey)) return streamResolutionInflight.get(cacheKey);
 
   const promise = (async () => {
-    const hls = await resolveStream(videoId, 'high', options);
+    const hls = await resolveStream(videoId, 'high', playerOptions);
     if (!/\.m3u8|manifest\/hls|m3u8/i.test(hls.url || '')) {
       throw new Error('No HLS manifest returned');
     }
@@ -1063,7 +1075,13 @@ async function resolveHlsAudio(videoId, options = {}) {
 function warmDirectAudio(videoId, options = {}) {
   if (!videoId || !(options.cookie || options.refreshToken || options.accessToken)) return;
   const useHls = process.env.PREFER_HLS_AUDIO === '1';
-  const cacheKey = useHls ? getPlaybackCacheKey(videoId, options, 'hls') : `${videoId}:${getAuthCacheKey(options)}`;
+  const hlsOptions = process.env.HLS_USE_ACCOUNT_AUTH === '1'
+    ? options
+    : {
+      hl: options.hl,
+      gl: options.gl,
+    };
+  const cacheKey = useHls ? getPlaybackCacheKey(videoId, hlsOptions, 'hls') : `${videoId}:${getAuthCacheKey(options)}`;
   if (getCachedStreamResolution(cacheKey) || streamResolutionInflight.has(cacheKey)) return;
 
   const promise = (useHls
@@ -1103,9 +1121,15 @@ async function prepareDirectAudioForTracks(tracks, options = {}, limit = 3) {
     ? process.env.PREPARE_HLS_TRACKS
     : process.env.PREPARE_DIRECT_TRACKS;
   const selectedLimit = Number(process.env.PREPARE_STREAM_TRACKS || configuredLimit || 1);
+  const hlsOptions = process.env.HLS_USE_ACCOUNT_AUTH === '1'
+    ? options
+    : {
+      hl: options.hl,
+      gl: options.gl,
+    };
   const selected = tracks.slice(0, selectedLimit).filter(track => track?.id);
   await Promise.allSettled(selected.map(track => {
-    const cacheKey = useHls ? getPlaybackCacheKey(track.id, options, 'hls') : `${track.id}:${getAuthCacheKey(options)}`;
+    const cacheKey = useHls ? getPlaybackCacheKey(track.id, hlsOptions, 'hls') : `${track.id}:${getAuthCacheKey(options)}`;
     if (getCachedStreamResolution(cacheKey)) return Promise.resolve();
     if (streamResolutionInflight.has(cacheKey)) return streamResolutionInflight.get(cacheKey);
 
@@ -1134,9 +1158,15 @@ async function prepareDirectAudioForTracks(tracks, options = {}, limit = 3) {
 function applyPreparedAudioMetadata(tracks, options = {}) {
   if (!Array.isArray(tracks) || !(options.cookie || options.refreshToken || options.accessToken)) return tracks;
   const useHls = process.env.PREFER_HLS_AUDIO === '1';
+  const hlsOptions = process.env.HLS_USE_ACCOUNT_AUTH === '1'
+    ? options
+    : {
+      hl: options.hl,
+      gl: options.gl,
+    };
   return tracks.map(track => {
     const prepared = getCachedStreamResolution(useHls
-      ? getPlaybackCacheKey(track.id, options, 'hls')
+      ? getPlaybackCacheKey(track.id, hlsOptions, 'hls')
       : `${track.id}:${getAuthCacheKey(options)}`);
     if (!prepared) return track;
 
