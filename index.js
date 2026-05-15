@@ -69,8 +69,8 @@ const URL_CACHE_TTL_MS = 10 * 60 * 1000;
 const PROXY_URL_TTL_MS = 20 * 60 * 1000;
 const COOKIE_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const TOKEN_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const PLAYER_TIMEOUT_MS = 5000;
-const DOWNLOAD_API_TIMEOUT_MS = 6000;
+const PLAYER_TIMEOUT_MS = 3000;
+const DOWNLOAD_API_TIMEOUT_MS = 5000;
 const YT_DLP_UNAVAILABLE_TTL_MS = 5 * 60 * 1000;
 let cachedVisitorData = null;
 let cachedVisitorDataFetchedAt = 0;
@@ -199,6 +199,14 @@ function stringifyProviderError(value) {
 function makeProviderError(prefix, data, status) {
   const details = stringifyProviderError(data);
   return new Error(details ? `${prefix}: ${details}` : `${prefix}: HTTP ${status}`);
+}
+
+function redactSecrets(text) {
+  return String(text || '')
+    .replace(/Bearer\s+1\/\/[A-Za-z0-9._-]+/g, 'Bearer [redacted]')
+    .replace(/Bearer\s+ya29\.[A-Za-z0-9._-]+/g, 'Bearer [redacted]')
+    .replace(/1\/\/[A-Za-z0-9._-]{16,}/g, '1//[redacted]')
+    .replace(/ya29\.[A-Za-z0-9._-]{16,}/g, 'ya29.[redacted]');
 }
 
 async function exchangeRefreshTokenViaOAuth(refreshToken) {
@@ -763,6 +771,26 @@ function setCachedStreamResolution(cacheKey, value) {
   });
 }
 
+async function validateAudioResult(result) {
+  const response = await fetch(result.url, {
+    headers: { Range: 'bytes=0-0' },
+    signal: AbortSignal.timeout(3000),
+  });
+  const contentType = response.headers.get('content-type') || result.contentType || '';
+  const contentLength = Number(response.headers.get('content-length') || 0);
+  if (response.body?.cancel) response.body.cancel().catch(() => {});
+  if (!response.ok && response.status !== 206) {
+    throw new Error(`Candidate audio URL failed: HTTP ${response.status}`);
+  }
+  if (!/audio|octet-stream|video\/mp4/i.test(contentType)) {
+    throw new Error(`Candidate audio URL is non-audio (${contentType || 'unknown'})`);
+  }
+  if (contentLength > 0 && contentLength < 32) {
+    throw new Error(`Candidate audio URL is too small (${contentLength} bytes)`);
+  }
+  return result;
+}
+
 async function resolveProxyAudio(videoId, options = {}) {
   const cacheKey = `${videoId}:${getAuthCacheKey(options)}`;
   const cached = getCachedStreamResolution(cacheKey);
@@ -772,30 +800,32 @@ async function resolveProxyAudio(videoId, options = {}) {
   }
 
   const promise = (async () => {
-    try {
-      const streamResult = await resolveStream(videoId, 'high', {
+    const attempts = [
+      resolveStream(videoId, 'high', {
         ...options,
         directOnly: true,
-      });
-      setCachedStreamResolution(cacheKey, streamResult);
-      return streamResult;
-    } catch (streamError) {
-      try {
-        const fallbackResult = await resolveDownload(videoId, '320', {
-          ...options,
-          skipStream: true,
-        });
-        setCachedStreamResolution(cacheKey, fallbackResult);
-        return fallbackResult;
-      } catch (fallbackError) {
-        if (options.cookie || options.refreshToken || options.accessToken) {
-          console.warn('[stream-proxy]', videoId, 'account-auth failed, retrying anonymous:', fallbackError.message);
-          return resolveProxyAudio(videoId);
-        }
-        console.error('[stream-proxy]', videoId, streamError.message);
-        console.error('[stream-proxy-fallback]', videoId, fallbackError.message);
-        throw fallbackError;
+      }).then(validateAudioResult),
+      resolveDownloadApi(videoId, 'high').then(validateAudioResult),
+    ];
+
+    if (!options.accessToken && options.tokenSource !== 'raw-bearer') {
+      attempts.push(resolveWithYtDlp(videoId, 'high', options).then(validateAudioResult));
+    }
+
+    try {
+      const result = await Promise.any(attempts);
+      setCachedStreamResolution(cacheKey, result);
+      return result;
+    } catch (aggregateError) {
+      const reasons = (aggregateError.errors || [aggregateError])
+        .map(e => redactSecrets(e.message))
+        .join(' | ');
+      if (options.cookie || options.refreshToken || options.accessToken) {
+        console.warn('[stream-proxy]', videoId, 'account-auth failed, retrying anonymous:', reasons);
+        return resolveProxyAudio(videoId);
       }
+      console.error('[stream-proxy]', videoId, reasons);
+      throw new Error(reasons || 'No playable audio found');
     }
   })().finally(() => {
     streamResolutionInflight.delete(cacheKey);
@@ -837,9 +867,14 @@ async function proxyAudioResponse(req, res, result) {
   if (req.headers.range) upstreamHeaders.Range = req.headers.range;
 
   const upstream = await fetch(result.url, { headers: upstreamHeaders });
+  const contentType = upstream.headers.get('content-type') || result.contentType || '';
   if (!upstream.ok && upstream.status !== 206) {
     res.status(upstream.status).send(await upstream.text().catch(() => 'Upstream audio failed'));
     return;
+  }
+  if (!/audio|octet-stream|video\/mp4/i.test(contentType)) {
+    const body = await upstream.text().catch(() => '');
+    throw new Error(`Upstream returned non-audio content (${contentType || 'unknown'}): ${body.slice(0, 120)}`);
   }
 
   res.status(upstream.status);
@@ -914,6 +949,10 @@ async function writeTempYtDlpCookieFile(cookieHeader) {
 }
 
 async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
+  if (options.accessToken || options.tokenSource === 'raw-bearer') {
+    throw new Error('yt-dlp skipped for bearer token sessions');
+  }
+
   const cacheKey = `${videoId}:${quality}:${options.cookie ? 'cookie' : options.accessToken ? 'token' : 'anon'}`;
   const cached = getCachedExtractedUrl(cacheKey);
   if (cached) return cached;
@@ -950,7 +989,6 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
             '--get-url',
             '--format',
             formatSelector,
-            ...(options.accessToken ? ['--add-header', `Authorization: Bearer ${options.accessToken}`] : []),
             ...(cookieTemp ? ['--cookies', cookieTemp.file] : []),
             `https://music.youtube.com/watch?v=${videoId}`,
           ],
@@ -960,7 +998,7 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
         break;
       } catch (e) {
         lastError = e;
-        const message = (e.stderr || e.message || '').trim();
+        const message = redactSecrets((e.stderr || e.message || '').trim());
         if (!message.includes('ENOENT') && !message.includes('No module named yt_dlp')) {
           break;
         }
@@ -973,7 +1011,7 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
   }
 
   if (!stdout && lastError) {
-    const message = (lastError.stderr || lastError.message).trim();
+    const message = redactSecrets((lastError.stderr || lastError.message).trim());
     if (message.includes('ENOENT') || message.includes('No module named yt_dlp')) {
       ytDlpUnavailableUntil = Date.now() + YT_DLP_UNAVAILABLE_TTL_MS;
       throw new Error('yt-dlp unavailable: ' + message);
@@ -1089,6 +1127,10 @@ async function resolveDownload(videoId, quality = '128', options = {}) {
     console.warn('[YTMusic] yt-dlp fallback unavailable for', videoId, '-', ytDlpError.message);
   }
 
+  return resolveDownloadApi(videoId, streamQuality);
+}
+
+async function resolveDownloadApi(videoId, streamQuality = 'high') {
   try {
     const response = await fetch(`${DOWNLOAD_API_BASE}${encodeURIComponent(videoId)}?s=5`, {
       signal: AbortSignal.timeout(DOWNLOAD_API_TIMEOUT_MS),
@@ -1106,6 +1148,7 @@ async function resolveDownload(videoId, quality = '128', options = {}) {
       url: data.downloadUrl,
       format: 'mp3',
       quality: streamQuality,
+      contentType: 'audio/mpeg',
     };
   } catch (downloadError) {
     console.warn('[YTMusic] Download API unavailable for', videoId, '-', downloadError.message);
