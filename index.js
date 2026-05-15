@@ -906,6 +906,18 @@ async function resolvePlaybackForEclipse(req, videoId, options = {}) {
         ...options,
         directOnly: true,
       });
+      if (process.env.RETURN_DIRECT_AUDIO_URLS === '1' || req.query.direct === '1') {
+        console.log('[stream]', videoId, 'returning direct audio URL');
+        return {
+          ...direct,
+          format: direct.format || 'm4a',
+          contentType: direct.contentType || 'audio/mp4',
+          contentLength: direct.contentLength,
+          quality: '128kbps',
+          duration: direct.duration || 0,
+          durationMs: direct.durationMs || ((direct.duration || 0) * 1000),
+        };
+      }
       console.log('[stream]', videoId, 'returning addon URL for direct audio');
       setCachedStreamResolution(`${videoId}:${getAuthCacheKey(options)}`, direct);
       return {
