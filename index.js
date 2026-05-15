@@ -1082,7 +1082,7 @@ function warmDirectAudio(videoId, options = {}) {
   streamResolutionInflight.set(cacheKey, promise);
 }
 
-function warmDirectAudioForTracks(tracks, options = {}, limit = 10) {
+function warmDirectAudioForTracks(tracks, options = {}, limit = Number(process.env.WARM_STREAM_TRACKS || 0)) {
   if (!Array.isArray(tracks) || !(options.cookie || options.refreshToken || options.accessToken)) return;
   for (const [index, track] of tracks.slice(0, limit).entries()) {
     const delay = index < 3 ? 0 : (index - 2) * 600;
