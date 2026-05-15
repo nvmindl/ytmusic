@@ -1095,7 +1095,10 @@ function warmDirectAudioForTracks(tracks, options = {}, limit = 10) {
 async function prepareDirectAudioForTracks(tracks, options = {}, limit = 3) {
   if (!Array.isArray(tracks) || !(options.cookie || options.refreshToken || options.accessToken)) return;
   const useHls = process.env.PREFER_HLS_AUDIO === '1';
-  const selectedLimit = useHls ? Number(process.env.PREPARE_HLS_TRACKS || 1) : limit;
+  const configuredLimit = useHls
+    ? process.env.PREPARE_HLS_TRACKS
+    : process.env.PREPARE_DIRECT_TRACKS;
+  const selectedLimit = Number(process.env.PREPARE_STREAM_TRACKS || configuredLimit || 1);
   const selected = tracks.slice(0, selectedLimit).filter(track => track?.id);
   await Promise.allSettled(selected.map(track => {
     const cacheKey = useHls ? getPlaybackCacheKey(track.id, options, 'hls') : `${track.id}:${getAuthCacheKey(options)}`;
