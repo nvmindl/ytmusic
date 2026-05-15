@@ -536,10 +536,10 @@ function cookiePageHtml(req, installUrl = '', error = '') {
 <body>
   <main>
     <h1>YouTube Music Cookie Session</h1>
-    <p>Paste a YouTube Music cookie to generate a private Eclipse install URL. The cookie is kept in server memory only and expires after 12 hours or when the server restarts.</p>
+    <p>Paste either the YouTube Music <code>1//</code> mobile token or a full browser Cookie header to generate a private Eclipse install URL.</p>
     <form method="post" action="cookie">
-      <label for="cookie">Cookie header</label>
-      <textarea id="cookie" name="cookie" autocomplete="off" spellcheck="false" placeholder="VISITOR_INFO1_LIVE=...; __Secure-1PSID=..."></textarea>
+      <label for="cookie">Token or Cookie header</label>
+      <textarea id="cookie" name="cookie" autocomplete="off" spellcheck="false" placeholder="1//0... or VISITOR_INFO1_LIVE=...; __Secure-1PSID=..."></textarea>
       <button type="submit">Create install URL</button>
     </form>
     ${installUrl ? `<div class="result"><strong>Install URL</strong><p><code>${installUrl}</code></p></div>` : ''}
@@ -898,9 +898,10 @@ async function resolvePlaybackForEclipse(req, videoId, options = {}) {
         ...options,
         directOnly: true,
       });
-      console.log('[stream]', videoId, 'returning direct user-IP audio URL');
+      console.log('[stream]', videoId, 'returning cached proxy for direct audio URL');
+      setCachedStreamResolution(`${videoId}:${getAuthCacheKey(options)}`, direct);
       return {
-        url: direct.url,
+        ...proxiedPlaybackResult(req, direct),
         format: direct.format || 'm4a',
         quality: '128kbps',
         duration: 0,
@@ -1338,9 +1339,16 @@ app.get(['/cookie', '/ytmusic/cookie'], (req, res) => {
   res.type('html').send(cookiePageHtml(req));
 });
 
-app.post(['/cookie', '/ytmusic/cookie'], (req, res) => {
+app.post(['/cookie', '/ytmusic/cookie'], async (req, res) => {
   try {
-    const sessionId = createCookieSession(req.body.cookie);
+    const pasted = String(req.body.cookie || '').trim();
+    const isToken = /^(?:authorization:\s*)?(?:bearer\s*)?1\/\//i.test(pasted) || /^(?:bearer\s*)?ya29\./i.test(pasted);
+    if (isToken) {
+      const sessionId = await createTokenSession(pasted, req.body.gl || 'SA', req.body.hl || 'en');
+      const installUrl = `${getBaseUrl(req)}/u/${encodeURIComponent(sessionId)}/manifest.json`;
+      return res.type('html').send(cookiePageHtml(req, installUrl));
+    }
+    const sessionId = createCookieSession(pasted);
     const installUrl = `${getBaseUrl(req)}/u/${encodeURIComponent(sessionId)}/manifest.json`;
     res.type('html').send(cookiePageHtml(req, installUrl));
   } catch (e) {
