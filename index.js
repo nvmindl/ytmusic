@@ -579,6 +579,66 @@ function parseInfoRuns(runs) {
   return { artist: parts[idx] || '', album: parts[idx + 1] || '' };
 }
 
+function normalizeForMatch(value = '') {
+  return String(value)
+    .toLowerCase()
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function uniqueWords(value = '') {
+  return [...new Set(normalizeForMatch(value).split(/\s+/).filter(Boolean))];
+}
+
+function rankSearchTracks(query, tracks, limit) {
+  const queryNorm = normalizeForMatch(query);
+  const queryWords = uniqueWords(query);
+  const queryHasVariant = /\b(instrumental|karaoke|cover|remix|live|sped|slowed|nightcore|acoustic|version)\b/i.test(query);
+  const seenIds = new Set();
+  const seenSongs = new Set();
+
+  return tracks
+    .filter(track => {
+      if (!track?.id || seenIds.has(track.id)) return false;
+      seenIds.add(track.id);
+
+      const songKey = `${normalizeForMatch(track.title)}::${normalizeForMatch(track.artist)}`;
+      if (songKey !== '::' && seenSongs.has(songKey)) return false;
+      seenSongs.add(songKey);
+      return true;
+    })
+    .map((track, index) => {
+      const titleNorm = normalizeForMatch(track.title);
+      const artistNorm = normalizeForMatch(track.artist);
+      const albumNorm = normalizeForMatch(track.album);
+      const haystack = `${titleNorm} ${artistNorm} ${albumNorm}`.trim();
+      let score = 0;
+
+      if (queryNorm && haystack.includes(queryNorm)) score += 80;
+      if (queryNorm && `${titleNorm} ${artistNorm}`.includes(queryNorm)) score += 120;
+      if (titleNorm && queryNorm.includes(titleNorm)) score += 60;
+      if (artistNorm && queryNorm.includes(artistNorm)) score += 80;
+
+      const matchedWords = queryWords.filter(word => haystack.includes(word)).length;
+      score += matchedWords * 12;
+      if (queryWords.length && matchedWords === queryWords.length) score += 40;
+
+      const variantText = `${track.title} ${track.artist} ${track.album}`;
+      if (!queryHasVariant && /\b(instrumental|karaoke|cover|remix|live|sped|slowed|nightcore|acoustic)\b/i.test(variantText)) {
+        score -= 90;
+      }
+      if (/topic$/i.test(track.artist || '')) score += 8;
+      if (track.duration > 0) score += 5;
+
+      return { track, score, index };
+    })
+    .sort((a, b) => (b.score - a.score) || (a.index - b.index))
+    .slice(0, limit)
+    .map(entry => entry.track);
+}
+
 // ─── Core functions (ported directly from the 8spine module) ─────────────────
 
 async function searchYTMusic(query, limit = 20, options = {}) {
@@ -622,7 +682,7 @@ async function searchYTMusic(query, limit = 20, options = {}) {
     const shelf = section.musicShelfRenderer;
     if (!shelf) continue;
     for (const item of (shelf.contents || [])) {
-      if (tracks.length >= limit) break;
+      if (tracks.length >= Math.max(limit * 2, 40)) break;
       const r = item.musicResponsiveListItemRenderer;
       if (!r) continue;
 
@@ -659,7 +719,7 @@ async function searchYTMusic(query, limit = 20, options = {}) {
     }
   }
 
-  return tracks;
+  return rankSearchTracks(query, tracks, limit);
 }
 
 async function searchYTMusicWithFallback(query, limit = 20, options = {}) {
@@ -912,7 +972,7 @@ function warmDirectAudio(videoId, options = {}) {
   streamResolutionInflight.set(cacheKey, promise);
 }
 
-function warmDirectAudioForTracks(tracks, options = {}, limit = 6) {
+function warmDirectAudioForTracks(tracks, options = {}, limit = 10) {
   if (!Array.isArray(tracks) || !(options.cookie || options.refreshToken || options.accessToken)) return;
   setTimeout(() => {
     for (const track of tracks.slice(0, limit)) {
