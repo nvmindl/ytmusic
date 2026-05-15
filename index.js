@@ -791,22 +791,21 @@ async function proxyAudioResponse(req, res, result) {
 }
 
 async function streamProxyAudio(req, res, videoId, options = {}) {
-  const playbackOptions = options.tokenSource === 'raw-bearer' ? {} : options;
   try {
     const result = await resolveStream(videoId, 'high', {
-      ...playbackOptions,
+      ...options,
       directOnly: true,
     });
     await proxyAudioResponse(req, res, result);
   } catch (streamError) {
     try {
       const result = await resolveDownload(videoId, '320', {
-        ...playbackOptions,
+        ...options,
         skipStream: true,
       });
       await proxyAudioResponse(req, res, result);
     } catch (fallbackError) {
-      if (playbackOptions.cookie || playbackOptions.refreshToken || playbackOptions.accessToken) {
+      if (options.cookie || options.refreshToken || options.accessToken) {
         try {
           console.warn('[stream-proxy]', videoId, 'account-auth failed, retrying anonymous:', fallbackError.message);
           return await streamProxyAudio(req, res, videoId);
