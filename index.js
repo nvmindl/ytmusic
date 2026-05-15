@@ -472,8 +472,8 @@ function manifestResponse(req) {
 
   return {
     id:          req.cookieSessionId ? `com.nvmindl.eclipse-ytmusic.${req.cookieSessionId}` : 'com.nvmindl.eclipse-ytmusic',
-    name:        'YouTube Music',
-    version:     '4.1.0-eclipse.1',
+    name:        'YTMUSIC by nvmindl',
+    version:     '4.1.1-eclipse.1',
     description,
     icon:        'https://music.youtube.com/img/favicon_144.png',
     resources:   ['search', 'stream', 'catalog'],
