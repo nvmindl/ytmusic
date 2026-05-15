@@ -1436,7 +1436,7 @@ app.get(['/u/:sessionId/stream-proxy-token/:token', '/ytmusic/u/:sessionId/strea
 
   try {
     console.log('[stream-proxy-token]', req.params.sessionId, 'range:', req.headers.range || 'none');
-    if (process.env.PROXY_AUDIO_BYTES !== '1' && req.query.proxy !== '1') {
+    if (process.env.REDIRECT_AUDIO_URLS === '1' || req.query.redirect === '1') {
       return res.redirect(302, result.url);
     }
     await proxyAudioResponse(req, res, result);
@@ -1535,7 +1535,7 @@ app.get(['/stream-proxy-token/:token', '/ytmusic/stream-proxy-token/:token'], as
 
   try {
     console.log('[stream-proxy-token]', 'public', 'range:', req.headers.range || 'none');
-    if (process.env.PROXY_AUDIO_BYTES !== '1' && req.query.proxy !== '1') {
+    if (process.env.REDIRECT_AUDIO_URLS === '1' || req.query.redirect === '1') {
       return res.redirect(302, result.url);
     }
     await proxyAudioResponse(req, res, result);
