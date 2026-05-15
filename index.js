@@ -730,6 +730,14 @@ function formatFromMimeType(mimeType = '') {
   return 'aac';
 }
 
+function durationFromPlayerData(data, format = {}) {
+  const approxMs = Number(format.approxDurationMs || 0);
+  if (approxMs > 0) return Math.round(approxMs / 1000);
+  const detailsSeconds = Number(data?.videoDetails?.lengthSeconds || 0);
+  if (detailsSeconds > 0) return Math.round(detailsSeconds);
+  return 0;
+}
+
 function getCachedExtractedUrl(cacheKey) {
   const entry = extractedUrlCache.get(cacheKey);
   if (!entry) return null;
@@ -905,8 +913,8 @@ async function resolvePlaybackForEclipse(req, videoId, options = {}) {
         format: direct.format || 'm4a',
         contentType: direct.contentType || 'audio/mp4',
         quality: '128kbps',
-        duration: 0,
-        durationMs: 0,
+        duration: direct.duration || 0,
+        durationMs: direct.durationMs || ((direct.duration || 0) * 1000),
       };
     } catch (e) {
       console.warn('[stream]', videoId, 'direct user-IP audio unavailable:', redactSecrets(e.message));
@@ -1172,11 +1180,14 @@ async function resolveStream(videoId, quality = 'high', options = {}) {
   if (options.directOnly) {
     if (!directFormat) throw new Error('No direct downloadable audio found for ' + videoId);
     console.log('[YTMusic] Direct audio for', videoId, 'itag:', directFormat.itag);
+    const duration = durationFromPlayerData(data, directFormat);
     return {
       url: directFormat.url,
       format: formatFromMimeType(directFormat.mimeType),
       quality,
       contentType: directFormat.mimeType?.split(';')[0],
+      duration,
+      durationMs: duration * 1000,
     };
   }
 
@@ -1189,11 +1200,14 @@ async function resolveStream(videoId, quality = 'high', options = {}) {
   // Strategy 2: Direct mp4 audio URL
   if (directFormat) {
     console.log('[YTMusic] Direct audio for', videoId, 'itag:', directFormat.itag);
+    const duration = durationFromPlayerData(data, directFormat);
     return {
       url: directFormat.url,
       format: formatFromMimeType(directFormat.mimeType),
       quality,
       contentType: directFormat.mimeType?.split(';')[0],
+      duration,
+      durationMs: duration * 1000,
     };
   }
 
