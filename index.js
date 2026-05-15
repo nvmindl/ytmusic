@@ -417,10 +417,19 @@ function getSessionOptions(req) {
 }
 
 async function addAccountAuth(headers, options = {}) {
+  if (options.tokenSession?.tokenSource === 'raw-bearer') {
+    const token = options.tokenSession.accessToken || options.tokenSession.refreshToken;
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+      headers['X-Goog-AuthUser'] = '0';
+      return;
+    }
+  }
+
   if (options.tokenSession?.refreshToken) {
     const accessToken = await refreshAccessToken(
       options.tokenSession,
-      options.tokenSession.tokenSource === 'raw-bearer'
+      false
     );
     if (accessToken) {
       headers.Authorization = `Bearer ${accessToken}`;
@@ -1086,7 +1095,8 @@ function warmDirectAudioForTracks(tracks, options = {}, limit = 10) {
 async function prepareDirectAudioForTracks(tracks, options = {}, limit = 3) {
   if (!Array.isArray(tracks) || !(options.cookie || options.refreshToken || options.accessToken)) return;
   const useHls = process.env.PREFER_HLS_AUDIO === '1';
-  const selected = tracks.slice(0, limit).filter(track => track?.id);
+  const selectedLimit = useHls ? Number(process.env.PREPARE_HLS_TRACKS || 1) : limit;
+  const selected = tracks.slice(0, selectedLimit).filter(track => track?.id);
   await Promise.allSettled(selected.map(track => {
     const cacheKey = useHls ? getPlaybackCacheKey(track.id, options, 'hls') : `${track.id}:${getAuthCacheKey(options)}`;
     if (getCachedStreamResolution(cacheKey)) return Promise.resolve();
@@ -1150,20 +1160,9 @@ async function resolvePlaybackForEclipse(req, videoId, options = {}) {
     try {
       const cacheKey = `${videoId}:${getAuthCacheKey(options)}`;
       if (process.env.PREFER_HLS_AUDIO === '1' || req.query.hls === '1') {
-        const hls = await resolveStream(videoId, 'high', options);
-        if (/\.m3u8|manifest\/hls|m3u8/i.test(hls.url || '')) {
-          const audioOnlyUrl = await getAudioOnlyHlsUrl(hls.url);
-          console.log('[stream]', videoId, 'returning HLS audio URL', audioOnlyUrl === hls.url ? 'master' : 'audio-only');
-          return {
-            ...hls,
-            url: audioOnlyUrl,
-            format: 'aac',
-            contentType: 'application/vnd.apple.mpegurl',
-            quality: '128kbps',
-            duration: hls.duration || 0,
-            durationMs: hls.durationMs || ((hls.duration || 0) * 1000),
-          };
-        }
+        const hls = await resolveHlsAudio(videoId, options);
+        console.log('[stream]', videoId, 'returning HLS audio URL');
+        return hls;
       }
       const direct = getCachedStreamResolution(cacheKey) || await resolveStream(videoId, 'high', {
         ...options,
