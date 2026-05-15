@@ -41,8 +41,10 @@ const PUBLIC_MOUNT_PATHS = ['/ytmusic'];
 const COOKIE_SESSION_FILE = process.env.COOKIE_SESSION_FILE || path.join(__dirname, '.cookie-sessions.json');
 const OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID || '';
 const OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET || '';
-const ISSUE_TOKEN_CLIENT_ID = process.env.GOOGLE_ISSUE_TOKEN_CLIENT_ID || '936475272427.apps.googleusercontent.com';
+const ISSUE_TOKEN_CLIENT_ID = process.env.GOOGLE_ISSUE_TOKEN_CLIENT_ID || '755973059757-iigsfdoqt2c4qm209soqp2dlrh33almr.apps.googleusercontent.com';
+const ISSUE_TOKEN_APP_ID = 'com.google.ios.youtubemusic';
 const YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube';
+const ISSUE_TOKEN_SCOPE = 'https://www.googleapis.com/auth/notifications';
 
 const WEB_REMIX_CONTEXT = {
   clientName:    'WEB_REMIX',
@@ -238,23 +240,27 @@ async function exchangeRefreshTokenViaOAuth(refreshToken) {
 }
 
 async function exchangeRefreshTokenViaIssueToken(refreshToken, hl = 'en') {
+  const language = String(hl || 'en-US').includes('-') ? String(hl || 'en-US') : `${String(hl || 'en')}-US`;
   const body = new URLSearchParams({
+    app_id: ISSUE_TOKEN_APP_ID,
     client_id: ISSUE_TOKEN_CLIENT_ID,
-    device_id: crypto.randomBytes(16).toString('hex'),
-    hl,
-    lib_ver: '3.3',
-    passcode_present: 'YES',
+    device_id: crypto.randomUUID().toUpperCase(),
+    hl: language,
+    lib_ver: '3.4',
     response_type: 'token',
-    scope: YOUTUBE_SCOPE,
+    scope: ISSUE_TOKEN_SCOPE,
   });
 
   const response = await fetch('https://oauthaccountmanager.googleapis.com/v1/issuetoken', {
     method: 'POST',
     headers: {
       'Accept': '*/*',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Accept-Language': 'en-US,en;q=0.9',
       'Authorization': `Bearer ${refreshToken}`,
       'Content-Type': 'application/x-www-form-urlencoded',
-      'User-Agent': 'com.google.ios.youtubemusic/7.29.1 iPhone/18.3.2 hw/iPhone16_2',
+      'X-OAuth-Client-ID': ISSUE_TOKEN_CLIENT_ID,
+      'User-Agent': 'com.google.ios.youtubemusic/9.18.2 iSL/3.4 iPhone/26.1 hw/iPhone17_3 (gzip)',
     },
     body,
     signal: AbortSignal.timeout(8000),
@@ -386,8 +392,11 @@ function getSessionOptions(req) {
 }
 
 async function addAccountAuth(headers, options = {}) {
-  if (options.tokenSession?.refreshToken && options.tokenSession.tokenSource !== 'raw-bearer') {
-    const accessToken = await refreshAccessToken(options.tokenSession);
+  if (options.tokenSession?.refreshToken) {
+    const accessToken = await refreshAccessToken(
+      options.tokenSession,
+      options.tokenSession.tokenSource === 'raw-bearer'
+    );
     if (accessToken) {
       headers.Authorization = `Bearer ${accessToken}`;
       headers['X-Goog-AuthUser'] = '0';
@@ -995,6 +1004,11 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
   const cacheKey = `${videoId}:${quality}:${options.cookie ? 'cookie' : options.accessToken ? 'token' : 'anon'}`;
   const cached = getCachedExtractedUrl(cacheKey);
   if (cached) return cached;
+  if (options.tokenSession?.refreshToken && options.tokenSession.tokenSource === 'raw-bearer') {
+    await refreshAccessToken(options.tokenSession, true);
+    options.accessToken = options.tokenSession.accessToken;
+    options.tokenSource = options.tokenSession.tokenSource;
+  }
   if (Date.now() < ytDlpUnavailableUntil) {
     throw new Error('yt-dlp unavailable');
   }
