@@ -473,14 +473,18 @@ function manifestResponse(req) {
   const baseUrl = getBaseUrl(req);
   const setupPageUrl = `${baseUrl}/setup`;
   const sessionKind = req.cookieSession?.refreshToken ? 'account-token' : 'cookie';
-  const description = req.cookieSessionId
+  const description = process.env.LOCAL_NO_TOKEN === '1'
+    ? 'Stream YouTube Music from this local network with anonymous iOS HLS, like the 8spine module.'
+    : req.cookieSessionId
     ? `Stream YouTube Music with your private ${sessionKind} session.`
     : `Stream YouTube Music in Eclipse. Create a private account-token install URL at ${setupPageUrl}.`;
 
   return {
-    id:          req.cookieSessionId ? `com.nvmindl.eclipse-ytmusic.${req.cookieSessionId}` : 'com.nvmindl.eclipse-ytmusic',
+    id:          process.env.LOCAL_NO_TOKEN === '1'
+      ? 'com.nvmindl.eclipse-ytmusic.local'
+      : req.cookieSessionId ? `com.nvmindl.eclipse-ytmusic.${req.cookieSessionId}` : 'com.nvmindl.eclipse-ytmusic',
     name:        'YTMUSIC by nvmindl',
-    version:     '4.1.1-eclipse.1',
+    version:     '4.1.2-eclipse.1',
     description,
     icon:        'https://music.youtube.com/img/favicon_144.png',
     resources:   ['search', 'stream', 'catalog'],
@@ -1204,6 +1208,16 @@ function proxiedPlaybackResult(req, result) {
 
 async function resolvePlaybackForEclipse(req, videoId, options = {}) {
   const sessionBasePath = getSessionBasePath(req);
+  if (!(options.cookie || options.refreshToken || options.accessToken) && (process.env.PREFER_HLS_AUDIO === '1' || req.query.hls === '1')) {
+    try {
+      const hls = await resolveHlsAudio(videoId, options);
+      console.log('[stream]', videoId, 'returning anonymous HLS URL');
+      return hls;
+    } catch (e) {
+      console.warn('[stream]', videoId, 'anonymous HLS unavailable:', redactSecrets(e.message));
+    }
+  }
+
   if (options.cookie || options.refreshToken || options.accessToken) {
     try {
       const cacheKey = `${videoId}:${getAuthCacheKey(options)}`;

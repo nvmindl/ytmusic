@@ -1,10 +1,11 @@
 {
   "name": "eclipse-ytmusic-addon",
-  "version": "4.1.1-eclipse.1",
+  "version": "4.1.2-eclipse.1",
   "description": "Eclipse Music addon - YouTube Music HLS streaming and offline downloads (port of 8spine-ytmusic)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
+    "local": "node local-notoken.js",
     "dev": "node --watch index.js"
   },
   "dependencies": {
