@@ -181,6 +181,24 @@ function normalizeRefreshToken(rawToken) {
     .replace(/^bearer\s+/i, '');
 }
 
+function stringifyProviderError(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+  if (value.message) return value.message;
+  if (value.error_description) return value.error_description;
+  if (value.error) return stringifyProviderError(value.error);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function makeProviderError(prefix, data, status) {
+  const details = stringifyProviderError(data);
+  return new Error(details ? `${prefix}: ${details}` : `${prefix}: HTTP ${status}`);
+}
+
 async function exchangeRefreshTokenViaOAuth(refreshToken) {
   if (!OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET) {
     throw new Error('OAuth client credentials are not configured');
@@ -202,7 +220,7 @@ async function exchangeRefreshTokenViaOAuth(refreshToken) {
   const text = await response.text();
   const data = JSON.parse(text || '{}');
   if (!response.ok || !data.access_token) {
-    throw new Error(data.error_description || data.error || `OAuth refresh failed: HTTP ${response.status}`);
+    throw makeProviderError('OAuth refresh failed', data, response.status);
   }
   return data;
 }
@@ -239,7 +257,7 @@ async function exchangeRefreshTokenViaIssueToken(refreshToken, hl = 'en') {
 
   const accessToken = data.access_token || data.token || data.auth_token;
   if (!response.ok || !accessToken) {
-    throw new Error(data.error_description || data.error || text || `IssueToken failed: HTTP ${response.status}`);
+    throw makeProviderError('IssueToken failed', data || text, response.status);
   }
   return {
     access_token: accessToken,
