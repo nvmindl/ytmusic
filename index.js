@@ -936,8 +936,6 @@ async function proxyAudioResponse(req, res, result) {
   const upstreamHeaders = {};
   if (req.headers.range) {
     upstreamHeaders.Range = req.headers.range;
-  } else if (req.method !== 'HEAD') {
-    upstreamHeaders.Range = 'bytes=0-65535';
   }
 
   if (req.method === 'HEAD') {
@@ -949,10 +947,7 @@ async function proxyAudioResponse(req, res, result) {
     return;
   }
 
-  const upstream = await fetch(result.url, {
-    headers: upstreamHeaders,
-    signal: AbortSignal.timeout(15000),
-  });
+  const upstream = await fetch(result.url, { headers: upstreamHeaders });
   const contentType = upstream.headers.get('content-type') || result.contentType || '';
   if (!upstream.ok && upstream.status !== 206) {
     res.status(upstream.status).send(await upstream.text().catch(() => 'Upstream audio failed'));
