@@ -76,6 +76,8 @@ let cachedVisitorData = null;
 let cachedVisitorDataFetchedAt = 0;
 const extractedUrlCache = new Map();
 const proxiedUrlCache = new Map();
+const streamResolutionCache = new Map();
+const streamResolutionInflight = new Map();
 const cookieSessions = new Map();
 let ytDlpUnavailableUntil = 0;
 
@@ -734,6 +736,81 @@ function getProxiedUrl(token) {
   return entry.value;
 }
 
+function getAuthCacheKey(options = {}) {
+  const authMaterial =
+    options.cookie ||
+    options.accessToken ||
+    options.refreshToken ||
+    options.tokenSource ||
+    'anon';
+  return crypto.createHash('sha1').update(String(authMaterial)).digest('hex').slice(0, 16);
+}
+
+function getCachedStreamResolution(cacheKey) {
+  const entry = streamResolutionCache.get(cacheKey);
+  if (!entry) return null;
+  if ((Date.now() - entry.createdAt) >= URL_CACHE_TTL_MS) {
+    streamResolutionCache.delete(cacheKey);
+    return null;
+  }
+  return entry.value;
+}
+
+function setCachedStreamResolution(cacheKey, value) {
+  streamResolutionCache.set(cacheKey, {
+    createdAt: Date.now(),
+    value,
+  });
+}
+
+async function resolveProxyAudio(videoId, options = {}) {
+  const cacheKey = `${videoId}:${getAuthCacheKey(options)}`;
+  const cached = getCachedStreamResolution(cacheKey);
+  if (cached) return cached;
+  if (streamResolutionInflight.has(cacheKey)) {
+    return streamResolutionInflight.get(cacheKey);
+  }
+
+  const promise = (async () => {
+    try {
+      const streamResult = await resolveStream(videoId, 'high', {
+        ...options,
+        directOnly: true,
+      });
+      setCachedStreamResolution(cacheKey, streamResult);
+      return streamResult;
+    } catch (streamError) {
+      try {
+        const fallbackResult = await resolveDownload(videoId, '320', {
+          ...options,
+          skipStream: true,
+        });
+        setCachedStreamResolution(cacheKey, fallbackResult);
+        return fallbackResult;
+      } catch (fallbackError) {
+        if (options.cookie || options.refreshToken || options.accessToken) {
+          console.warn('[stream-proxy]', videoId, 'account-auth failed, retrying anonymous:', fallbackError.message);
+          return resolveProxyAudio(videoId);
+        }
+        console.error('[stream-proxy]', videoId, streamError.message);
+        console.error('[stream-proxy-fallback]', videoId, fallbackError.message);
+        throw fallbackError;
+      }
+    }
+  })().finally(() => {
+    streamResolutionInflight.delete(cacheKey);
+  });
+
+  streamResolutionInflight.set(cacheKey, promise);
+  return promise;
+}
+
+function warmProxyAudio(videoId, options = {}) {
+  resolveProxyAudio(videoId, options).catch(e => {
+    console.warn('[stream-warm]', videoId, e.message);
+  });
+}
+
 function proxiedPlaybackResult(req, result) {
   const token = setProxiedUrl(result);
   const sessionBasePath = getSessionBasePath(req);
@@ -745,6 +822,7 @@ function proxiedPlaybackResult(req, result) {
 
 async function resolvePlaybackForEclipse(req, videoId, options = {}) {
   const sessionBasePath = getSessionBasePath(req);
+  warmProxyAudio(videoId, options);
   return {
     url: `${getBaseUrl(req)}${sessionBasePath}/stream-proxy/${encodeURIComponent(videoId)}.m4a`,
     format: 'm4a',
@@ -792,31 +870,10 @@ async function proxyAudioResponse(req, res, result) {
 
 async function streamProxyAudio(req, res, videoId, options = {}) {
   try {
-    const result = await resolveStream(videoId, 'high', {
-      ...options,
-      directOnly: true,
-    });
+    const result = await resolveProxyAudio(videoId, options);
     await proxyAudioResponse(req, res, result);
-  } catch (streamError) {
-    try {
-      const result = await resolveDownload(videoId, '320', {
-        ...options,
-        skipStream: true,
-      });
-      await proxyAudioResponse(req, res, result);
-    } catch (fallbackError) {
-      if (options.cookie || options.refreshToken || options.accessToken) {
-        try {
-          console.warn('[stream-proxy]', videoId, 'account-auth failed, retrying anonymous:', fallbackError.message);
-          return await streamProxyAudio(req, res, videoId);
-        } catch (anonymousError) {
-          console.error('[stream-proxy-anon]', videoId, anonymousError.message);
-        }
-      }
-      console.error('[stream-proxy]', videoId, streamError.message);
-      console.error('[stream-proxy-fallback]', videoId, fallbackError.message);
-      res.status(500).json({ error: fallbackError.message });
-    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 }
 
