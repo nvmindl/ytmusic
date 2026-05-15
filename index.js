@@ -63,6 +63,17 @@ const IOS_CONTEXT = {
   hl: 'en',
 };
 
+const IOS_MUSIC_CONTEXT = {
+  clientName:    26,
+  clientVersion: '9.18.2',
+  deviceMake:    'Apple',
+  deviceModel:   'iPhone17,3',
+  osName:        'iPhone',
+  osVersion:     '26.1',
+  hl: 'en',
+  gl: 'SA',
+};
+
 // ─── In-memory visitorData cache ──────────────────────────────────────────────
 // Captured from every WEB_REMIX search response and forwarded to the IOS
 // player to pass YouTube's bot detection — same technique as the 8spine module.
@@ -1087,24 +1098,34 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
 async function resolveStream(videoId, quality = 'high', options = {}) {
   const visitorData   = await getVisitorData(options);
   const hasAccountAuth = options.cookie || options.refreshToken || options.accessToken;
-  const clientContext = Object.assign({}, hasAccountAuth ? WEB_REMIX_CONTEXT : IOS_CONTEXT);
+  const isTokenAuth = options.refreshToken || options.accessToken;
+  const clientContext = Object.assign({}, isTokenAuth ? IOS_MUSIC_CONTEXT : hasAccountAuth ? WEB_REMIX_CONTEXT : IOS_CONTEXT);
   if (options.hl) clientContext.hl = options.hl;
   if (options.gl) clientContext.gl = options.gl;
   if (visitorData) clientContext.visitorData = visitorData;
 
   const headers = {
     'Content-Type': 'application/json',
-    'User-Agent': hasAccountAuth
+    'User-Agent': isTokenAuth
+      ? 'com.google.ios.youtubemusic/9.18.2 (iPhone17,3; U; CPU iOS 26_1 like Mac OS X; en_US)'
+      : hasAccountAuth
       ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       : 'com.google.ios.youtube/20.10.01 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)',
   };
+  if (isTokenAuth) {
+    headers['X-Youtube-Client-Name'] = '26';
+    headers['X-Youtube-Client-Version'] = IOS_MUSIC_CONTEXT.clientVersion;
+    headers['X-GOOG-API-FORMAT-VERSION'] = '2';
+    if (visitorData) headers['X-Goog-Visitor-Id'] = visitorData;
+  }
   if (hasAccountAuth) {
     headers.Origin = YTM_BASE;
     headers.Referer = YTM_BASE + '/';
     await addAccountAuth(headers, options);
   }
 
-  const response = await fetch(`${YTM_BASE}/youtubei/v1/player?prettyPrint=false`, {
+  const playerBase = isTokenAuth ? 'https://youtubei.googleapis.com' : YTM_BASE;
+  const response = await fetch(`${playerBase}/youtubei/v1/player?prettyPrint=false`, {
     method:  'POST',
     headers,
     signal: AbortSignal.timeout(PLAYER_TIMEOUT_MS),
