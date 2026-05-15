@@ -72,12 +72,14 @@ const TOKEN_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PLAYER_TIMEOUT_MS = 3000;
 const DOWNLOAD_API_TIMEOUT_MS = 5000;
 const YT_DLP_UNAVAILABLE_TTL_MS = 5 * 60 * 1000;
+const STREAM_FAILURE_TTL_MS = 30 * 1000;
 let cachedVisitorData = null;
 let cachedVisitorDataFetchedAt = 0;
 const extractedUrlCache = new Map();
 const proxiedUrlCache = new Map();
 const streamResolutionCache = new Map();
 const streamResolutionInflight = new Map();
+const streamResolutionFailures = new Map();
 const cookieSessions = new Map();
 let ytDlpUnavailableUntil = 0;
 
@@ -769,6 +771,24 @@ function setCachedStreamResolution(cacheKey, value) {
     createdAt: Date.now(),
     value,
   });
+  streamResolutionFailures.delete(cacheKey);
+}
+
+function getCachedStreamFailure(cacheKey) {
+  const entry = streamResolutionFailures.get(cacheKey);
+  if (!entry) return null;
+  if ((Date.now() - entry.createdAt) >= STREAM_FAILURE_TTL_MS) {
+    streamResolutionFailures.delete(cacheKey);
+    return null;
+  }
+  return entry.error;
+}
+
+function setCachedStreamFailure(cacheKey, error) {
+  streamResolutionFailures.set(cacheKey, {
+    createdAt: Date.now(),
+    error,
+  });
 }
 
 async function validateAudioResult(result) {
@@ -795,6 +815,8 @@ async function resolveProxyAudio(videoId, options = {}) {
   const cacheKey = `${videoId}:${getAuthCacheKey(options)}`;
   const cached = getCachedStreamResolution(cacheKey);
   if (cached) return cached;
+  const cachedFailure = getCachedStreamFailure(cacheKey);
+  if (cachedFailure) throw cachedFailure;
   if (streamResolutionInflight.has(cacheKey)) {
     return streamResolutionInflight.get(cacheKey);
   }
@@ -820,12 +842,10 @@ async function resolveProxyAudio(videoId, options = {}) {
       const reasons = (aggregateError.errors || [aggregateError])
         .map(e => redactSecrets(e.message))
         .join(' | ');
-      if (options.cookie || options.refreshToken || options.accessToken) {
-        console.warn('[stream-proxy]', videoId, 'account-auth failed, retrying anonymous:', reasons);
-        return resolveProxyAudio(videoId);
-      }
+      const error = new Error(reasons || 'No playable audio found');
+      setCachedStreamFailure(cacheKey, error);
       console.error('[stream-proxy]', videoId, reasons);
-      throw new Error(reasons || 'No playable audio found');
+      throw error;
     }
   })().finally(() => {
     streamResolutionInflight.delete(cacheKey);
