@@ -1077,6 +1077,20 @@ async function resolvePlaybackForEclipse(req, videoId, options = {}) {
   if (options.cookie || options.refreshToken || options.accessToken) {
     try {
       const cacheKey = `${videoId}:${getAuthCacheKey(options)}`;
+      if (process.env.PREFER_HLS_AUDIO === '1' || req.query.hls === '1') {
+        const hls = await resolveStream(videoId, 'high', options);
+        if (/\.m3u8|manifest\/hls|m3u8/i.test(hls.url || '')) {
+          console.log('[stream]', videoId, 'returning HLS audio URL');
+          return {
+            ...hls,
+            format: 'aac',
+            contentType: 'application/vnd.apple.mpegurl',
+            quality: '128kbps',
+            duration: hls.duration || 0,
+            durationMs: hls.durationMs || ((hls.duration || 0) * 1000),
+          };
+        }
+      }
       const direct = getCachedStreamResolution(cacheKey) || await resolveStream(videoId, 'high', {
         ...options,
         directOnly: true,
@@ -1391,7 +1405,15 @@ async function resolveStream(videoId, quality = 'high', options = {}) {
   // Strategy 1: HLS manifest — preferred, native support in Eclipse
   if (sd.hlsManifestUrl) {
     console.log('[YTMusic] HLS stream for', videoId);
-    return { url: sd.hlsManifestUrl, format: 'aac', quality };
+    const duration = durationFromPlayerData(data);
+    return {
+      url: sd.hlsManifestUrl,
+      format: 'aac',
+      quality,
+      contentType: 'application/vnd.apple.mpegurl',
+      duration,
+      durationMs: duration * 1000,
+    };
   }
 
   // Strategy 2: Direct mp4 audio URL
