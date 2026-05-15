@@ -39,6 +39,10 @@ const YTM_API_KEY = 'AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30';
 const DOWNLOAD_API_BASE = 'https://capi.y2jar.cc/scr/';
 const PUBLIC_MOUNT_PATHS = ['/ytmusic'];
 const COOKIE_SESSION_FILE = process.env.COOKIE_SESSION_FILE || path.join(__dirname, '.cookie-sessions.json');
+const OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID || '';
+const OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET || '';
+const ISSUE_TOKEN_CLIENT_ID = process.env.GOOGLE_ISSUE_TOKEN_CLIENT_ID || '936475272427.apps.googleusercontent.com';
+const YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube';
 
 const WEB_REMIX_CONTEXT = {
   clientName:    'WEB_REMIX',
@@ -64,6 +68,7 @@ const VISITOR_DATA_TTL_MS = 20 * 60 * 1000;
 const URL_CACHE_TTL_MS = 10 * 60 * 1000;
 const PROXY_URL_TTL_MS = 20 * 60 * 1000;
 const COOKIE_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const TOKEN_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const PLAYER_TIMEOUT_MS = 5000;
 const DOWNLOAD_API_TIMEOUT_MS = 6000;
 const YT_DLP_UNAVAILABLE_TTL_MS = 5 * 60 * 1000;
@@ -90,8 +95,9 @@ function loadCookieSessions() {
     if (!fsSync.existsSync(COOKIE_SESSION_FILE)) return;
     const sessions = JSON.parse(fsSync.readFileSync(COOKIE_SESSION_FILE, 'utf8'));
     for (const [id, session] of Object.entries(sessions)) {
-      if (!session?.cookie || !session?.createdAt) continue;
-      if ((Date.now() - session.createdAt) < COOKIE_SESSION_TTL_MS) {
+      if ((!session?.cookie && !session?.refreshToken && !session?.accessToken) || !session?.createdAt) continue;
+      const ttl = (session.refreshToken || session.accessToken) ? TOKEN_SESSION_TTL_MS : COOKIE_SESSION_TTL_MS;
+      if ((Date.now() - session.createdAt) < ttl) {
         cookieSessions.set(id, session);
       }
     }
@@ -168,6 +174,104 @@ function getSapisidAuthHeader(cookieHeader, origin) {
   return `SAPISIDHASH ${timestamp}_${hash}`;
 }
 
+function normalizeRefreshToken(rawToken) {
+  return String(rawToken || '')
+    .trim()
+    .replace(/^authorization:\s*bearer\s+/i, '')
+    .replace(/^bearer\s+/i, '');
+}
+
+async function exchangeRefreshTokenViaOAuth(refreshToken) {
+  if (!OAUTH_CLIENT_ID || !OAUTH_CLIENT_SECRET) {
+    throw new Error('OAuth client credentials are not configured');
+  }
+
+  const body = new URLSearchParams({
+    client_id: OAUTH_CLIENT_ID,
+    client_secret: OAUTH_CLIENT_SECRET,
+    refresh_token: refreshToken,
+    grant_type: 'refresh_token',
+  });
+
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+    signal: AbortSignal.timeout(8000),
+  });
+  const text = await response.text();
+  const data = JSON.parse(text || '{}');
+  if (!response.ok || !data.access_token) {
+    throw new Error(data.error_description || data.error || `OAuth refresh failed: HTTP ${response.status}`);
+  }
+  return data;
+}
+
+async function exchangeRefreshTokenViaIssueToken(refreshToken, hl = 'en') {
+  const body = new URLSearchParams({
+    client_id: ISSUE_TOKEN_CLIENT_ID,
+    device_id: crypto.randomBytes(16).toString('hex'),
+    hl,
+    lib_ver: '3.3',
+    passcode_present: 'YES',
+    response_type: 'token',
+    scope: YOUTUBE_SCOPE,
+  });
+
+  const response = await fetch('https://oauthaccountmanager.googleapis.com/v1/issuetoken', {
+    method: 'POST',
+    headers: {
+      'Accept': '*/*',
+      'Authorization': `Bearer ${refreshToken}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': 'com.google.ios.youtubemusic/7.29.1 iPhone/18.3.2 hw/iPhone16_2',
+    },
+    body,
+    signal: AbortSignal.timeout(8000),
+  });
+  const text = await response.text();
+  let data;
+  try {
+    data = JSON.parse(text || '{}');
+  } catch {
+    data = Object.fromEntries(new URLSearchParams(text));
+  }
+
+  const accessToken = data.access_token || data.token || data.auth_token;
+  if (!response.ok || !accessToken) {
+    throw new Error(data.error_description || data.error || text || `IssueToken failed: HTTP ${response.status}`);
+  }
+  return {
+    access_token: accessToken,
+    expires_in: Number(data.expires_in || data.expiresIn || 3600),
+    token_type: data.token_type || data.tokenType || 'Bearer',
+    scope: data.scope || YOUTUBE_SCOPE,
+  };
+}
+
+async function refreshAccessToken(session, force = false) {
+  if (!session?.refreshToken) return null;
+  if (!force && session.accessToken && session.accessTokenExpiresAt > (Date.now() + 60_000)) {
+    return session.accessToken;
+  }
+
+  let data;
+  try {
+    data = await exchangeRefreshTokenViaOAuth(session.refreshToken);
+    session.tokenSource = 'oauth';
+  } catch (oauthError) {
+    data = await exchangeRefreshTokenViaIssueToken(session.refreshToken, session.hl || 'en');
+    session.tokenSource = 'issuetoken';
+    session.lastOAuthError = oauthError.message;
+  }
+
+  session.accessToken = data.access_token;
+  session.accessTokenExpiresAt = Date.now() + (Number(data.expires_in || 3600) * 1000);
+  session.lastUsedAt = Date.now();
+  saveCookieSessions();
+  return session.accessToken;
+}
+
 function createCookieSession(rawCookie) {
   const cookie = normalizeCookieHeader(rawCookie);
   if (!cookie) throw new Error('Cookie is required');
@@ -185,11 +289,41 @@ function createCookieSession(rawCookie) {
   return id;
 }
 
+async function createTokenSession(rawToken, gl = 'US', hl = 'en') {
+  const refreshToken = normalizeRefreshToken(rawToken);
+  if (!refreshToken) throw new Error('Refresh token is required');
+  if (!/^1\/\//.test(refreshToken) && !/^ya29\./.test(refreshToken)) {
+    throw new Error('Paste the token that starts with 1// from the YouTube Music mobile setup.');
+  }
+
+  const id = crypto.randomUUID();
+  const session = {
+    gl: String(gl || 'US').trim().toUpperCase().slice(0, 2) || 'US',
+    hl: String(hl || 'en').trim().slice(0, 12) || 'en',
+    createdAt: Date.now(),
+    lastUsedAt: Date.now(),
+  };
+
+  if (/^ya29\./.test(refreshToken)) {
+    session.accessToken = refreshToken;
+    session.accessTokenExpiresAt = Date.now() + (45 * 60 * 1000);
+    session.tokenSource = 'access-token';
+  } else {
+    session.refreshToken = refreshToken;
+    await refreshAccessToken(session, true);
+  }
+
+  cookieSessions.set(id, session);
+  saveCookieSessions();
+  return id;
+}
+
 function getCookieSession(id) {
   if (!id) return null;
   const session = cookieSessions.get(id);
   if (!session) return null;
-  if ((Date.now() - session.createdAt) >= COOKIE_SESSION_TTL_MS) {
+  const ttl = (session.refreshToken || session.accessToken) ? TOKEN_SESSION_TTL_MS : COOKIE_SESSION_TTL_MS;
+  if ((Date.now() - session.createdAt) >= ttl) {
     cookieSessions.delete(id);
     saveCookieSessions();
     return null;
@@ -202,7 +336,35 @@ function getCookieSession(id) {
 function getSessionOptions(req) {
   return {
     cookie: req.cookieSession?.cookie || null,
+    accessToken: req.cookieSession?.accessToken || null,
+    refreshToken: req.cookieSession?.refreshToken || null,
+    tokenSession: req.cookieSession || null,
+    gl: req.cookieSession?.gl || null,
+    hl: req.cookieSession?.hl || null,
   };
+}
+
+async function addAccountAuth(headers, options = {}) {
+  if (options.tokenSession?.refreshToken) {
+    const accessToken = await refreshAccessToken(options.tokenSession);
+    if (accessToken) {
+      headers.Authorization = `Bearer ${accessToken}`;
+      headers['X-Goog-AuthUser'] = '0';
+      headers['X-Origin'] = YTM_BASE;
+    }
+  } else if (options.accessToken) {
+    headers.Authorization = `Bearer ${options.accessToken}`;
+    headers['X-Goog-AuthUser'] = '0';
+    headers['X-Origin'] = YTM_BASE;
+  }
+  if (options.cookie) {
+    headers.Cookie = options.cookie;
+    headers['X-Goog-AuthUser'] = '0';
+    headers['X-Origin'] = YTM_BASE;
+    const authHeader = getSapisidAuthHeader(options.cookie, YTM_BASE);
+    if (authHeader) headers.Authorization = authHeader;
+  }
+  return headers;
 }
 
 function requireCookieSession(req, res, next) {
@@ -219,10 +381,11 @@ function requireCookieSession(req, res, next) {
 
 function manifestResponse(req) {
   const baseUrl = getBaseUrl(req);
-  const cookiePageUrl = `${baseUrl}/cookie`;
+  const setupPageUrl = `${baseUrl}/setup`;
+  const sessionKind = req.cookieSession?.refreshToken ? 'account-token' : 'cookie';
   const description = req.cookieSessionId
-    ? 'Stream YouTube Music with your private cookie-backed session. This session expires automatically.'
-    : `Stream YouTube Music HLS with refreshed visitor sessions. If playback is blocked, create a cookie-backed install URL at ${cookiePageUrl}.`;
+    ? `Stream YouTube Music with your private ${sessionKind} session.`
+    : `Stream YouTube Music in Eclipse. Create a private account-token install URL at ${setupPageUrl}.`;
 
   return {
     id:          req.cookieSessionId ? `com.nvmindl.eclipse-ytmusic.${req.cookieSessionId}` : 'com.nvmindl.eclipse-ytmusic',
@@ -234,6 +397,56 @@ function manifestResponse(req) {
     types:       ['track', 'album'],
     contentType: 'music',
   };
+}
+
+function setupPageHtml(req, installUrl = '', error = '') {
+  const baseUrl = getBaseUrl(req);
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube Music Eclipse Setup</title>
+  <style>
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #101114; color: #f5f5f5; }
+    main { width: min(780px, calc(100% - 32px)); margin: 44px auto; }
+    label, textarea, button, input, select { display: block; width: 100%; box-sizing: border-box; }
+    textarea, input, select { margin-top: 8px; border: 1px solid #3a3d45; border-radius: 8px; background: #181a20; color: #f5f5f5; padding: 12px; }
+    textarea { min-height: 150px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    button { margin-top: 16px; border: 0; border-radius: 8px; background: #2da7df; color: white; padding: 12px 14px; font-weight: 700; cursor: pointer; }
+    p, li { color: #c5c7ce; line-height: 1.55; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .result, .error { margin-top: 24px; padding: 16px; border-radius: 8px; }
+    .result { background: #18251d; border: 1px solid #2f6f43; }
+    .error { background: #2a1719; border: 1px solid #8f3440; }
+    code { overflow-wrap: anywhere; }
+    a { color: #7dd3fc; }
+    @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>YouTube Music Eclipse Setup</h1>
+    <p>This creates a private Eclipse addon URL using the account token style used by the working YouTube Music addon flow. Paste the token that starts with <code>1//</code>; do not paste it into the browser address bar.</p>
+    <form method="post" action="${baseUrl}/api/setup">
+      <label for="refreshToken">YouTube Music account token</label>
+      <textarea id="refreshToken" name="refreshToken" autocomplete="off" spellcheck="false" placeholder="1//0..."></textarea>
+      <div class="grid">
+        <label>Country
+          <input name="gl" value="SA" maxlength="2">
+        </label>
+        <label>Language
+          <input name="hl" value="en">
+        </label>
+      </div>
+      <button type="submit">Create Eclipse install URL</button>
+    </form>
+    <p>Cookie fallback is still available at <a href="${baseUrl}/cookie">${baseUrl}/cookie</a>, but account-token setup is the path we should test now.</p>
+    ${installUrl ? `<div class="result"><strong>Install URL</strong><p><code>${installUrl}</code></p></div>` : ''}
+    ${error ? `<div class="error">${error}</div>` : ''}
+  </main>
+</body>
+</html>`;
 }
 
 function cookiePageHtml(req, installUrl = '', error = '') {
@@ -313,13 +526,18 @@ async function searchYTMusic(query, limit = 20, options = {}) {
     'Referer':      YTM_BASE + '/',
     'User-Agent':   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   };
-  if (options.cookie) headers.Cookie = options.cookie;
+  await addAccountAuth(headers, options);
+  const client = {
+    ...WEB_REMIX_CONTEXT,
+    ...(options.hl ? { hl: options.hl } : {}),
+    ...(options.gl ? { gl: options.gl } : {}),
+  };
 
   const response = await fetch(`${YTM_BASE}/youtubei/v1/search?key=${YTM_API_KEY}`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
-      context: { client: WEB_REMIX_CONTEXT },
+      context: { client },
       query,
       params: 'EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D', // filter: songs
     }),
@@ -590,7 +808,7 @@ async function writeTempYtDlpCookieFile(cookieHeader) {
 }
 
 async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
-  const cacheKey = `${videoId}:${quality}:${options.cookie ? 'cookie' : 'anon'}`;
+  const cacheKey = `${videoId}:${quality}:${options.cookie ? 'cookie' : options.accessToken ? 'token' : 'anon'}`;
   const cached = getCachedExtractedUrl(cacheKey);
   if (cached) return cached;
   if (Date.now() < ytDlpUnavailableUntil) {
@@ -626,6 +844,7 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
             '--get-url',
             '--format',
             formatSelector,
+            ...(options.accessToken ? ['--add-header', `Authorization: Bearer ${options.accessToken}`] : []),
             ...(cookieTemp ? ['--cookies', cookieTemp.file] : []),
             `https://music.youtube.com/watch?v=${videoId}`,
           ],
@@ -670,23 +889,22 @@ async function resolveWithYtDlp(videoId, quality = 'high', options = {}) {
 
 async function resolveStream(videoId, quality = 'high', options = {}) {
   const visitorData   = await getVisitorData(options);
-  const clientContext = Object.assign({}, options.cookie ? WEB_REMIX_CONTEXT : IOS_CONTEXT);
+  const hasAccountAuth = options.cookie || options.refreshToken || options.accessToken;
+  const clientContext = Object.assign({}, hasAccountAuth ? WEB_REMIX_CONTEXT : IOS_CONTEXT);
+  if (options.hl) clientContext.hl = options.hl;
+  if (options.gl) clientContext.gl = options.gl;
   if (visitorData) clientContext.visitorData = visitorData;
 
   const headers = {
     'Content-Type': 'application/json',
-    'User-Agent': options.cookie
+    'User-Agent': hasAccountAuth
       ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       : 'com.google.ios.youtube/20.10.01 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X)',
   };
-  if (options.cookie) {
-    headers.Cookie = options.cookie;
+  if (hasAccountAuth) {
     headers.Origin = YTM_BASE;
     headers.Referer = YTM_BASE + '/';
-    headers['X-Origin'] = YTM_BASE;
-    headers['X-Goog-AuthUser'] = '0';
-    const authHeader = getSapisidAuthHeader(options.cookie, YTM_BASE);
-    if (authHeader) headers.Authorization = authHeader;
+    await addAccountAuth(headers, options);
   }
 
   const response = await fetch(`${YTM_BASE}/youtubei/v1/player?prettyPrint=false`, {
@@ -796,13 +1014,18 @@ async function getAlbum(albumId, options = {}) {
     'Referer':      YTM_BASE + '/',
     'User-Agent':   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   };
-  if (options.cookie) headers.Cookie = options.cookie;
+  await addAccountAuth(headers, options);
+  const client = {
+    ...WEB_REMIX_CONTEXT,
+    ...(options.hl ? { hl: options.hl } : {}),
+    ...(options.gl ? { gl: options.gl } : {}),
+  };
 
   const response = await fetch(`${YTM_BASE}/youtubei/v1/browse?key=${YTM_API_KEY}`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
-      context:  { client: WEB_REMIX_CONTEXT },
+      context:  { client },
       browseId: albumId,
     }),
   });
@@ -868,6 +1091,24 @@ async function getAlbum(albumId, options = {}) {
 
 // ─── Eclipse HTTP endpoints ───────────────────────────────────────────────────
 
+app.get(['/setup', '/ytmusic/setup'], (req, res) => {
+  res.type('html').send(setupPageHtml(req));
+});
+
+app.post(['/api/setup', '/ytmusic/api/setup'], async (req, res) => {
+  const wantsJson = req.is('application/json') || /\bapplication\/json\b/.test(req.get('accept') || '');
+  try {
+    const sessionId = await createTokenSession(req.body.refreshToken, req.body.gl, req.body.hl);
+    const installUrl = `${getBaseUrl(req)}/u/${encodeURIComponent(sessionId)}/manifest.json`;
+    if (wantsJson) return res.json({ url: installUrl, installUrl });
+    res.type('html').send(setupPageHtml(req, installUrl));
+  } catch (e) {
+    console.error('[setup]', e.message);
+    if (wantsJson) return res.status(400).json({ error: e.message });
+    res.status(400).type('html').send(setupPageHtml(req, '', e.message));
+  }
+});
+
 app.get(['/cookie', '/ytmusic/cookie'], (req, res) => {
   res.type('html').send(cookiePageHtml(req));
 });
@@ -893,7 +1134,7 @@ app.get(['/u/:sessionId/search', '/ytmusic/u/:sessionId/search'], async (req, re
   if (!query) return res.json({ tracks: [] });
 
   try {
-    const tracks = await searchYTMusic(query, 20);
+    const tracks = await searchYTMusic(query, 20, getSessionOptions(req));
     res.json({ tracks: withStreamUrls(req, tracks) });
   } catch (e) {
     console.error('[search]', e.message);
@@ -964,7 +1205,7 @@ app.get(['/u/:sessionId/audio/:id', '/ytmusic/u/:sessionId/audio/:id'], (req, re
 app.get(['/u/:sessionId/album/:id', '/ytmusic/u/:sessionId/album/:id'], async (req, res) => {
   const albumId = req.params.id;
   try {
-    const album = await getAlbum(albumId);
+    const album = await getAlbum(albumId, getSessionOptions(req));
     album.tracks = withStreamUrls(req, album.tracks);
     res.json(album);
   } catch (e) {
