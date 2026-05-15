@@ -895,10 +895,21 @@ function setCachedStreamFailure(cacheKey, error) {
 }
 
 async function validateAudioResult(result) {
-  const response = await fetch(result.url, {
-    headers: { Range: 'bytes=0-0' },
-    signal: AbortSignal.timeout(8000),
-  });
+  let currentUrl = result.url;
+  let response;
+  for (let redirects = 0; redirects < 5; redirects += 1) {
+    response = await fetch(currentUrl, {
+      headers: { Range: 'bytes=0-0' },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(8000),
+    });
+    if (![301, 302, 303, 307, 308].includes(response.status)) break;
+    const location = response.headers.get('location');
+    if (!location) break;
+    if (response.body?.cancel) response.body.cancel().catch(() => {});
+    currentUrl = new URL(location, currentUrl).toString();
+  }
+
   const contentType = response.headers.get('content-type') || result.contentType || '';
   const contentLength = Number(response.headers.get('content-length') || 0);
   const contentRange = response.headers.get('content-range') || '';
@@ -915,7 +926,7 @@ async function validateAudioResult(result) {
   }
   return {
     ...result,
-    url: response.url || result.url,
+    url: currentUrl,
     contentType: contentType || result.contentType,
     contentLength: rangeLength || result.contentLength || contentLength || undefined,
   };
