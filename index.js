@@ -889,6 +889,38 @@ function warmProxyAudio(videoId, options = {}) {
   });
 }
 
+function warmDirectAudio(videoId, options = {}) {
+  if (!videoId || !(options.cookie || options.refreshToken || options.accessToken)) return;
+  const cacheKey = `${videoId}:${getAuthCacheKey(options)}`;
+  if (getCachedStreamResolution(cacheKey) || streamResolutionInflight.has(cacheKey)) return;
+
+  const promise = resolveStream(videoId, 'high', {
+    ...options,
+    directOnly: true,
+  })
+    .then(result => {
+      setCachedStreamResolution(cacheKey, result);
+      return result;
+    })
+    .catch(e => {
+      console.warn('[stream-prewarm]', videoId, redactSecrets(e.message));
+    })
+    .finally(() => {
+      streamResolutionInflight.delete(cacheKey);
+    });
+
+  streamResolutionInflight.set(cacheKey, promise);
+}
+
+function warmDirectAudioForTracks(tracks, options = {}, limit = 6) {
+  if (!Array.isArray(tracks) || !(options.cookie || options.refreshToken || options.accessToken)) return;
+  setTimeout(() => {
+    for (const track of tracks.slice(0, limit)) {
+      warmDirectAudio(track.id, options);
+    }
+  }, 0);
+}
+
 function proxiedPlaybackResult(req, result) {
   const token = setProxiedUrl(result);
   const sessionBasePath = getSessionBasePath(req);
@@ -902,10 +934,12 @@ async function resolvePlaybackForEclipse(req, videoId, options = {}) {
   const sessionBasePath = getSessionBasePath(req);
   if (options.cookie || options.refreshToken || options.accessToken) {
     try {
-      const direct = await resolveStream(videoId, 'high', {
+      const cacheKey = `${videoId}:${getAuthCacheKey(options)}`;
+      const direct = getCachedStreamResolution(cacheKey) || await resolveStream(videoId, 'high', {
         ...options,
         directOnly: true,
       });
+      setCachedStreamResolution(cacheKey, direct);
       if (process.env.RETURN_DIRECT_AUDIO_URLS === '1' || req.query.direct === '1') {
         console.log('[stream]', videoId, 'returning direct audio URL');
         return {
@@ -919,7 +953,6 @@ async function resolvePlaybackForEclipse(req, videoId, options = {}) {
         };
       }
       console.log('[stream]', videoId, 'returning addon URL for direct audio');
-      setCachedStreamResolution(`${videoId}:${getAuthCacheKey(options)}`, direct);
       return {
         ...proxiedPlaybackResult(req, direct),
         format: direct.format || 'm4a',
@@ -1420,7 +1453,9 @@ app.get(['/u/:sessionId/search', '/ytmusic/u/:sessionId/search'], async (req, re
   if (!query) return res.json({ tracks: [] });
 
   try {
-    const tracks = await searchYTMusicWithFallback(query, 20, getSessionOptions(req));
+    const options = getSessionOptions(req);
+    const tracks = await searchYTMusicWithFallback(query, 20, options);
+    warmDirectAudioForTracks(tracks, options);
     res.json({ tracks: withStreamUrls(req, tracks) });
   } catch (e) {
     console.error('[search]', e.message);
@@ -1505,7 +1540,9 @@ app.get(['/u/:sessionId/audio/:id', '/ytmusic/u/:sessionId/audio/:id'], (req, re
 app.get(['/u/:sessionId/album/:id', '/ytmusic/u/:sessionId/album/:id'], async (req, res) => {
   const albumId = req.params.id;
   try {
-    const album = await getAlbum(albumId, getSessionOptions(req));
+    const options = getSessionOptions(req);
+    const album = await getAlbum(albumId, options);
+    warmDirectAudioForTracks(album.tracks, options);
     album.tracks = withStreamUrls(req, album.tracks);
     res.json(album);
   } catch (e) {
