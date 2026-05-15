@@ -872,6 +872,25 @@ function proxiedPlaybackResult(req, result) {
 
 async function resolvePlaybackForEclipse(req, videoId, options = {}) {
   const sessionBasePath = getSessionBasePath(req);
+  if (options.cookie || options.refreshToken || options.accessToken) {
+    try {
+      const direct = await resolveStream(videoId, 'high', {
+        ...options,
+        directOnly: true,
+      });
+      console.log('[stream]', videoId, 'returning direct user-IP audio URL');
+      return {
+        url: direct.url,
+        format: direct.format || 'm4a',
+        quality: '128kbps',
+        duration: 0,
+        durationMs: 0,
+      };
+    } catch (e) {
+      console.warn('[stream]', videoId, 'direct user-IP audio unavailable:', redactSecrets(e.message));
+    }
+  }
+
   warmProxyAudio(videoId, options);
   return {
     url: `${getBaseUrl(req)}${sessionBasePath}/stream-proxy/${encodeURIComponent(videoId)}.m4a`,
