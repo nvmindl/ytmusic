@@ -157,7 +157,11 @@ function getSessionBasePath(req) {
 }
 
 function withStreamUrls(req, tracks) {
-  return tracks;
+  const sessionBasePath = req.cookieSessionId ? getSessionBasePath(req) : '';
+  return tracks.map(track => ({
+    ...track,
+    streamURL: `${getBaseUrl(req)}${sessionBasePath}/stream/${encodeURIComponent(track.id)}`,
+  }));
 }
 
 function normalizeCookieHeader(rawCookie) {
@@ -997,6 +1001,34 @@ function warmDirectAudioForTracks(tracks, options = {}, limit = 10) {
   }
 }
 
+async function prepareDirectAudioForTracks(tracks, options = {}, limit = 3) {
+  if (!Array.isArray(tracks) || !(options.cookie || options.refreshToken || options.accessToken)) return;
+  const selected = tracks.slice(0, limit).filter(track => track?.id);
+  await Promise.allSettled(selected.map(track => {
+    const cacheKey = `${track.id}:${getAuthCacheKey(options)}`;
+    if (getCachedStreamResolution(cacheKey)) return Promise.resolve();
+    if (streamResolutionInflight.has(cacheKey)) return streamResolutionInflight.get(cacheKey);
+
+    const promise = resolveStream(track.id, 'high', {
+      ...options,
+      directOnly: true,
+    })
+      .then(result => {
+        setCachedStreamResolution(cacheKey, result);
+        return result;
+      })
+      .catch(e => {
+        console.warn('[stream-prepare]', track.id, redactSecrets(e.message));
+      })
+      .finally(() => {
+        streamResolutionInflight.delete(cacheKey);
+      });
+
+    streamResolutionInflight.set(cacheKey, promise);
+    return promise;
+  }));
+}
+
 function proxiedPlaybackResult(req, result) {
   const token = setProxiedUrl(result);
   const sessionBasePath = getSessionBasePath(req);
@@ -1531,6 +1563,7 @@ app.get(['/u/:sessionId/search', '/ytmusic/u/:sessionId/search'], async (req, re
   try {
     const options = getSessionOptions(req);
     const tracks = await searchYTMusicWithFallback(query, 20, options);
+    await prepareDirectAudioForTracks(tracks, options);
     warmDirectAudioForTracks(tracks, options);
     res.json({ tracks: withStreamUrls(req, tracks) });
   } catch (e) {
@@ -1618,6 +1651,7 @@ app.get(['/u/:sessionId/album/:id', '/ytmusic/u/:sessionId/album/:id'], async (r
   try {
     const options = getSessionOptions(req);
     const album = await getAlbum(albumId, options);
+    await prepareDirectAudioForTracks(album.tracks, options);
     warmDirectAudioForTracks(album.tracks, options);
     album.tracks = withStreamUrls(req, album.tracks);
     res.json(album);
