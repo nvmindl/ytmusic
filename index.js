@@ -898,21 +898,12 @@ async function resolvePlaybackForEclipse(req, videoId, options = {}) {
         ...options,
         directOnly: true,
       });
-      console.log('[stream]', videoId, process.env.RETURN_DIRECT_AUDIO_URLS === '0' ? 'returning cached proxy for direct audio URL' : 'returning direct audio URL');
+      console.log('[stream]', videoId, 'returning addon URL for direct audio');
       setCachedStreamResolution(`${videoId}:${getAuthCacheKey(options)}`, direct);
-      if (process.env.RETURN_DIRECT_AUDIO_URLS !== '0') {
-        return {
-          url: direct.url,
-          format: direct.format || 'm4a',
-          quality: '128kbps',
-          contentType: direct.contentType || 'audio/mp4',
-          duration: 0,
-          durationMs: 0,
-        };
-      }
       return {
         ...proxiedPlaybackResult(req, direct),
         format: direct.format || 'm4a',
+        contentType: direct.contentType || 'audio/mp4',
         quality: '128kbps',
         duration: 0,
         durationMs: 0,
@@ -936,7 +927,10 @@ async function proxyAudioResponse(req, res, result) {
   const upstreamHeaders = {};
   if (req.headers.range) upstreamHeaders.Range = req.headers.range;
 
-  const upstream = await fetch(result.url, { headers: upstreamHeaders });
+  const upstream = await fetch(result.url, {
+    headers: upstreamHeaders,
+    signal: AbortSignal.timeout(15000),
+  });
   const contentType = upstream.headers.get('content-type') || result.contentType || '';
   if (!upstream.ok && upstream.status !== 206) {
     res.status(upstream.status).send(await upstream.text().catch(() => 'Upstream audio failed'));
@@ -1415,6 +1409,7 @@ app.get(['/u/:sessionId/stream-proxy-token/:token', '/ytmusic/u/:sessionId/strea
   if (!result) return res.status(404).json({ error: 'Audio URL expired. Press play again.' });
 
   try {
+    console.log('[stream-proxy-token]', req.params.sessionId, 'range:', req.headers.range || 'none');
     await proxyAudioResponse(req, res, result);
   } catch (e) {
     console.error('[stream-proxy-token]', e.message);
@@ -1510,6 +1505,7 @@ app.get(['/stream-proxy-token/:token', '/ytmusic/stream-proxy-token/:token'], as
   if (!result) return res.status(404).json({ error: 'Audio URL expired. Press play again.' });
 
   try {
+    console.log('[stream-proxy-token]', 'public', 'range:', req.headers.range || 'none');
     await proxyAudioResponse(req, res, result);
   } catch (e) {
     console.error('[stream-proxy-token]', e.message);
