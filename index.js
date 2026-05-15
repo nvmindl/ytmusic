@@ -898,8 +898,18 @@ async function resolvePlaybackForEclipse(req, videoId, options = {}) {
         ...options,
         directOnly: true,
       });
-      console.log('[stream]', videoId, 'returning cached proxy for direct audio URL');
+      console.log('[stream]', videoId, process.env.RETURN_DIRECT_AUDIO_URLS === '0' ? 'returning cached proxy for direct audio URL' : 'returning direct audio URL');
       setCachedStreamResolution(`${videoId}:${getAuthCacheKey(options)}`, direct);
+      if (process.env.RETURN_DIRECT_AUDIO_URLS !== '0') {
+        return {
+          url: direct.url,
+          format: direct.format || 'm4a',
+          quality: '128kbps',
+          contentType: direct.contentType || 'audio/mp4',
+          duration: 0,
+          durationMs: 0,
+        };
+      }
       return {
         ...proxiedPlaybackResult(req, direct),
         format: direct.format || 'm4a',
