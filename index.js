@@ -964,7 +964,19 @@ async function proxyAudioResponse(req, res, result) {
     res.end();
     return;
   }
-  Readable.fromWeb(upstream.body).pipe(res);
+  const audioStream = Readable.fromWeb(upstream.body);
+  audioStream.on('error', error => {
+    console.warn('[proxy-audio]', 'upstream stream error:', error.message);
+    if (!res.headersSent) {
+      res.status(502).end('Upstream audio failed');
+    } else {
+      res.destroy(error);
+    }
+  });
+  res.on('close', () => {
+    audioStream.destroy();
+  });
+  audioStream.pipe(res);
 }
 
 async function streamProxyAudio(req, res, videoId, options = {}) {
