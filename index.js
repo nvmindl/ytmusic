@@ -157,11 +157,7 @@ function getSessionBasePath(req) {
 }
 
 function withStreamUrls(req, tracks) {
-  const sessionBasePath = req.cookieSessionId ? getSessionBasePath(req) : '';
-  return tracks.map(track => ({
-    ...track,
-    streamURL: `${getBaseUrl(req)}${sessionBasePath}/stream/${encodeURIComponent(track.id)}`,
-  }));
+  return tracks;
 }
 
 function normalizeCookieHeader(rawCookie) {
