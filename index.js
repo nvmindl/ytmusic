@@ -912,6 +912,7 @@ async function resolvePlaybackForEclipse(req, videoId, options = {}) {
         ...proxiedPlaybackResult(req, direct),
         format: direct.format || 'm4a',
         contentType: direct.contentType || 'audio/mp4',
+        contentLength: direct.contentLength,
         quality: '128kbps',
         duration: direct.duration || 0,
         durationMs: direct.durationMs || ((direct.duration || 0) * 1000),
@@ -933,7 +934,20 @@ async function resolvePlaybackForEclipse(req, videoId, options = {}) {
 
 async function proxyAudioResponse(req, res, result) {
   const upstreamHeaders = {};
-  if (req.headers.range) upstreamHeaders.Range = req.headers.range;
+  if (req.headers.range) {
+    upstreamHeaders.Range = req.headers.range;
+  } else if (req.method !== 'HEAD') {
+    upstreamHeaders.Range = 'bytes=0-65535';
+  }
+
+  if (req.method === 'HEAD') {
+    res.setHeader('Content-Type', result.contentType || 'audio/mp4');
+    res.setHeader('Accept-Ranges', 'bytes');
+    if (result.contentLength) res.setHeader('Content-Length', String(result.contentLength));
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.end();
+    return;
+  }
 
   const upstream = await fetch(result.url, {
     headers: upstreamHeaders,
@@ -1186,6 +1200,7 @@ async function resolveStream(videoId, quality = 'high', options = {}) {
       format: formatFromMimeType(directFormat.mimeType),
       quality,
       contentType: directFormat.mimeType?.split(';')[0],
+      contentLength: Number(directFormat.contentLength || 0) || undefined,
       duration,
       durationMs: duration * 1000,
     };
@@ -1206,6 +1221,7 @@ async function resolveStream(videoId, quality = 'high', options = {}) {
       format: formatFromMimeType(directFormat.mimeType),
       quality,
       contentType: directFormat.mimeType?.split(';')[0],
+      contentLength: Number(directFormat.contentLength || 0) || undefined,
       duration,
       durationMs: duration * 1000,
     };
