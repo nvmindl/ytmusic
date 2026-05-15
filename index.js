@@ -367,6 +367,7 @@ function getSessionOptions(req) {
     accessToken: req.cookieSession?.accessToken || null,
     refreshToken: req.cookieSession?.refreshToken || null,
     tokenSession: req.cookieSession || null,
+    tokenSource: req.cookieSession?.tokenSource || null,
     gl: req.cookieSession?.gl || null,
     hl: req.cookieSession?.hl || null,
   };
@@ -630,6 +631,10 @@ async function searchYTMusic(query, limit = 20, options = {}) {
 }
 
 async function searchYTMusicWithFallback(query, limit = 20, options = {}) {
+  if (options.tokenSource === 'raw-bearer') {
+    return searchYTMusic(query, limit);
+  }
+
   const tracks = await searchYTMusic(query, limit, options);
   if (tracks.length || (!options.cookie && !options.refreshToken && !options.accessToken)) {
     return tracks;
@@ -739,16 +744,13 @@ function proxiedPlaybackResult(req, result) {
 }
 
 async function resolvePlaybackForEclipse(req, videoId, options = {}) {
-  const result = await resolveDownload(videoId, '320', {
-    ...options,
-    skipStream: true,
-  });
+  const sessionBasePath = getSessionBasePath(req);
   return {
-    ...proxiedPlaybackResult(req, result),
+    url: `${getBaseUrl(req)}${sessionBasePath}/stream-proxy/${encodeURIComponent(videoId)}.m4a`,
     format: 'm4a',
-    quality: result.quality || '128kbps',
-    duration: result.duration || 0,
-    durationMs: result.durationMs || (result.duration ? result.duration * 1000 : 0),
+    quality: '128kbps',
+    duration: 0,
+    durationMs: 0,
   };
 }
 
@@ -789,21 +791,22 @@ async function proxyAudioResponse(req, res, result) {
 }
 
 async function streamProxyAudio(req, res, videoId, options = {}) {
+  const playbackOptions = options.tokenSource === 'raw-bearer' ? {} : options;
   try {
     const result = await resolveStream(videoId, 'high', {
-      ...options,
+      ...playbackOptions,
       directOnly: true,
     });
     await proxyAudioResponse(req, res, result);
   } catch (streamError) {
     try {
       const result = await resolveDownload(videoId, '320', {
-        ...options,
+        ...playbackOptions,
         skipStream: true,
       });
       await proxyAudioResponse(req, res, result);
     } catch (fallbackError) {
-      if (options.cookie || options.refreshToken || options.accessToken) {
+      if (playbackOptions.cookie || playbackOptions.refreshToken || playbackOptions.accessToken) {
         try {
           console.warn('[stream-proxy]', videoId, 'account-auth failed, retrying anonymous:', fallbackError.message);
           return await streamProxyAudio(req, res, videoId);
