@@ -629,6 +629,16 @@ async function searchYTMusic(query, limit = 20, options = {}) {
   return tracks;
 }
 
+async function searchYTMusicWithFallback(query, limit = 20, options = {}) {
+  const tracks = await searchYTMusic(query, limit, options);
+  if (tracks.length || (!options.cookie && !options.refreshToken && !options.accessToken)) {
+    return tracks;
+  }
+
+  console.warn('[search] Account-auth search returned no tracks, retrying anonymous search for:', query);
+  return searchYTMusic(query, limit);
+}
+
 async function getVisitorData(options = {}) {
   if (options.cookie) return cachedVisitorData;
   if (cachedVisitorData && (Date.now() - cachedVisitorDataFetchedAt) < VISITOR_DATA_TTL_MS) {
@@ -793,6 +803,14 @@ async function streamProxyAudio(req, res, videoId, options = {}) {
       });
       await proxyAudioResponse(req, res, result);
     } catch (fallbackError) {
+      if (options.cookie || options.refreshToken || options.accessToken) {
+        try {
+          console.warn('[stream-proxy]', videoId, 'account-auth failed, retrying anonymous:', fallbackError.message);
+          return await streamProxyAudio(req, res, videoId);
+        } catch (anonymousError) {
+          console.error('[stream-proxy-anon]', videoId, anonymousError.message);
+        }
+      }
       console.error('[stream-proxy]', videoId, streamError.message);
       console.error('[stream-proxy-fallback]', videoId, fallbackError.message);
       res.status(500).json({ error: fallbackError.message });
@@ -1163,7 +1181,7 @@ app.get(['/u/:sessionId/search', '/ytmusic/u/:sessionId/search'], async (req, re
   if (!query) return res.json({ tracks: [] });
 
   try {
-    const tracks = await searchYTMusic(query, 20, getSessionOptions(req));
+    const tracks = await searchYTMusicWithFallback(query, 20, getSessionOptions(req));
     res.json({ tracks: withStreamUrls(req, tracks) });
   } catch (e) {
     console.error('[search]', e.message);
@@ -1173,9 +1191,19 @@ app.get(['/u/:sessionId/search', '/ytmusic/u/:sessionId/search'], async (req, re
 
 app.get(['/u/:sessionId/stream/:id', '/ytmusic/u/:sessionId/stream/:id'], async (req, res) => {
   const videoId = req.params.id;
+  const options = getSessionOptions(req);
   try {
-    res.json(await resolvePlaybackForEclipse(req, videoId, getSessionOptions(req)));
+    res.json(await resolvePlaybackForEclipse(req, videoId, options));
   } catch (e) {
+    if (options.cookie || options.refreshToken || options.accessToken) {
+      try {
+        console.warn('[stream]', videoId, 'account-auth failed, retrying anonymous:', e.message);
+        return res.json(await resolvePlaybackForEclipse(req, videoId));
+      } catch (fallbackError) {
+        console.error('[stream]', videoId, fallbackError.message);
+        return res.status(500).json({ error: fallbackError.message });
+      }
+    }
     console.error('[stream]', videoId, e.message);
     res.status(500).json({ error: e.message });
   }
@@ -1254,7 +1282,7 @@ app.get(['/search', '/ytmusic/search'], async (req, res) => {
   if (!query) return res.json({ tracks: [] });
 
   try {
-    const tracks = await searchYTMusic(query, 20);
+    const tracks = await searchYTMusicWithFallback(query, 20);
     res.json({ tracks: withStreamUrls(req, tracks) });
   } catch (e) {
     console.error('[search]', e.message);
