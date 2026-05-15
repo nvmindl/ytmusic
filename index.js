@@ -813,6 +813,23 @@ function durationFromPlayerData(data, format = {}) {
   return 0;
 }
 
+async function getAudioOnlyHlsUrl(masterUrl) {
+  const response = await fetch(masterUrl, { signal: AbortSignal.timeout(8000) });
+  if (!response.ok) return masterUrl;
+
+  const manifest = await response.text();
+  const mediaLines = manifest.split(/\r?\n/).filter(line => line.startsWith('#EXT-X-MEDIA:'));
+  const audioLines = mediaLines.filter(line => /TYPE=AUDIO/.test(line));
+  const preferred =
+    audioLines.find(line => /GROUP-ID="234"/.test(line)) ||
+    audioLines.find(line => /itag\/234|itag%3D140/.test(line)) ||
+    audioLines.find(line => /GROUP-ID="233"/.test(line)) ||
+    audioLines[0];
+
+  const uri = preferred?.match(/URI="([^"]+)"/)?.[1];
+  return uri ? new URL(uri, masterUrl).toString() : masterUrl;
+}
+
 function getCachedExtractedUrl(cacheKey) {
   const entry = extractedUrlCache.get(cacheKey);
   if (!entry) return null;
@@ -1080,9 +1097,11 @@ async function resolvePlaybackForEclipse(req, videoId, options = {}) {
       if (process.env.PREFER_HLS_AUDIO === '1' || req.query.hls === '1') {
         const hls = await resolveStream(videoId, 'high', options);
         if (/\.m3u8|manifest\/hls|m3u8/i.test(hls.url || '')) {
-          console.log('[stream]', videoId, 'returning HLS audio URL');
+          const audioOnlyUrl = await getAudioOnlyHlsUrl(hls.url);
+          console.log('[stream]', videoId, 'returning HLS audio URL', audioOnlyUrl === hls.url ? 'master' : 'audio-only');
           return {
             ...hls,
+            url: audioOnlyUrl,
             format: 'aac',
             contentType: 'application/vnd.apple.mpegurl',
             quality: '128kbps',
