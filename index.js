@@ -328,7 +328,17 @@ async function createTokenSession(rawToken, gl = 'US', hl = 'en') {
     session.tokenSource = 'access-token';
   } else {
     session.refreshToken = refreshToken;
-    await refreshAccessToken(session, true);
+    try {
+      await refreshAccessToken(session, true);
+    } catch (e) {
+      // Tokens captured from the YouTube Music mobile app can be bound to
+      // Google's own OAuth client. If exchange is blocked, keep it as the
+      // bearer token and let the private addon test it directly.
+      session.accessToken = refreshToken;
+      session.accessTokenExpiresAt = Date.now() + (45 * 60 * 1000);
+      session.tokenSource = 'raw-bearer';
+      session.lastTokenExchangeError = e.message;
+    }
   }
 
   cookieSessions.set(id, session);
@@ -363,14 +373,15 @@ function getSessionOptions(req) {
 }
 
 async function addAccountAuth(headers, options = {}) {
-  if (options.tokenSession?.refreshToken) {
+  if (options.tokenSession?.refreshToken && options.tokenSession.tokenSource !== 'raw-bearer') {
     const accessToken = await refreshAccessToken(options.tokenSession);
     if (accessToken) {
       headers.Authorization = `Bearer ${accessToken}`;
       headers['X-Goog-AuthUser'] = '0';
       headers['X-Origin'] = YTM_BASE;
     }
-  } else if (options.accessToken) {
+  }
+  if (!headers.Authorization && options.accessToken) {
     headers.Authorization = `Bearer ${options.accessToken}`;
     headers['X-Goog-AuthUser'] = '0';
     headers['X-Origin'] = YTM_BASE;
