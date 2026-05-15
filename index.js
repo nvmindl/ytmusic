@@ -1032,7 +1032,8 @@ function warmProxyAudio(videoId, options = {}) {
 }
 
 async function resolveHlsAudio(videoId, options = {}) {
-  const playerOptions = process.env.HLS_USE_ACCOUNT_AUTH === '1'
+  const useAccountAuth = process.env.HLS_USE_ACCOUNT_AUTH === '1';
+  const playerOptions = useAccountAuth
     ? options
     : {
       hl: options.hl,
@@ -1044,7 +1045,17 @@ async function resolveHlsAudio(videoId, options = {}) {
   if (streamResolutionInflight.has(cacheKey)) return streamResolutionInflight.get(cacheKey);
 
   const promise = (async () => {
-    const hls = await resolveStream(videoId, 'high', playerOptions);
+    let hls;
+    try {
+      hls = await resolveStream(videoId, 'high', playerOptions);
+    } catch (e) {
+      if (useAccountAuth || !(options.cookie || options.refreshToken || options.accessToken)) {
+        throw e;
+      }
+      console.warn('[hls]', videoId, 'anonymous player failed, retrying account-auth:', redactSecrets(e.message));
+      hls = await resolveStream(videoId, 'high', options);
+    }
+
     if (!/\.m3u8|manifest\/hls|m3u8/i.test(hls.url || '')) {
       throw new Error('No HLS manifest returned');
     }
