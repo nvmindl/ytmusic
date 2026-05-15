@@ -413,13 +413,11 @@ async function addAccountAuth(headers, options = {}) {
     if (accessToken) {
       headers.Authorization = `Bearer ${accessToken}`;
       headers['X-Goog-AuthUser'] = '0';
-      headers['X-Origin'] = YTM_BASE;
     }
   }
   if (!headers.Authorization && options.accessToken) {
     headers.Authorization = `Bearer ${options.accessToken}`;
     headers['X-Goog-AuthUser'] = '0';
-    headers['X-Origin'] = YTM_BASE;
   }
   if (options.cookie) {
     headers.Cookie = options.cookie;
@@ -1120,9 +1118,11 @@ async function resolveStream(videoId, quality = 'high', options = {}) {
     headers['X-GOOG-API-FORMAT-VERSION'] = '2';
     if (visitorData) headers['X-Goog-Visitor-Id'] = visitorData;
   }
-  if (hasAccountAuth) {
+  if (hasAccountAuth && !isTokenAuth) {
     headers.Origin = YTM_BASE;
     headers.Referer = YTM_BASE + '/';
+  }
+  if (hasAccountAuth) {
     await addAccountAuth(headers, options);
   }
 
