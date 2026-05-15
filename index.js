@@ -910,7 +910,7 @@ async function validateAudioResult(result) {
   if (!/audio|octet-stream|video\/mp4/i.test(contentType)) {
     throw new Error(`Candidate audio URL is non-audio (${contentType || 'unknown'})`);
   }
-  if (contentLength > 0 && contentLength < 32) {
+  if (!contentRange && contentLength > 0 && contentLength < 32) {
     throw new Error(`Candidate audio URL is too small (${contentLength} bytes)`);
   }
   return {
