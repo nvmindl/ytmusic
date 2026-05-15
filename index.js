@@ -1422,6 +1422,9 @@ app.get(['/u/:sessionId/stream-proxy-token/:token', '/ytmusic/u/:sessionId/strea
 
   try {
     console.log('[stream-proxy-token]', req.params.sessionId, 'range:', req.headers.range || 'none');
+    if (process.env.PROXY_AUDIO_BYTES !== '1' && req.query.proxy !== '1') {
+      return res.redirect(302, result.url);
+    }
     await proxyAudioResponse(req, res, result);
   } catch (e) {
     console.error('[stream-proxy-token]', e.message);
@@ -1518,6 +1521,9 @@ app.get(['/stream-proxy-token/:token', '/ytmusic/stream-proxy-token/:token'], as
 
   try {
     console.log('[stream-proxy-token]', 'public', 'range:', req.headers.range || 'none');
+    if (process.env.PROXY_AUDIO_BYTES !== '1' && req.query.proxy !== '1') {
+      return res.redirect(302, result.url);
+    }
     await proxyAudioResponse(req, res, result);
   } catch (e) {
     console.error('[stream-proxy-token]', e.message);
