@@ -44,7 +44,7 @@ const OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET || '';
 const ISSUE_TOKEN_CLIENT_ID = process.env.GOOGLE_ISSUE_TOKEN_CLIENT_ID || '755973059757-iigsfdoqt2c4qm209soqp2dlrh33almr.apps.googleusercontent.com';
 const ISSUE_TOKEN_APP_ID = 'com.google.ios.youtubemusic';
 const YOUTUBE_SCOPE = 'https://www.googleapis.com/auth/youtube';
-const ISSUE_TOKEN_SCOPE = 'https://www.googleapis.com/auth/notifications';
+const ISSUE_TOKEN_SCOPE = YOUTUBE_SCOPE;
 
 const WEB_REMIX_CONTEXT = {
   clientName:    'WEB_REMIX',
