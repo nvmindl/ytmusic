@@ -1029,6 +1029,24 @@ async function prepareDirectAudioForTracks(tracks, options = {}, limit = 3) {
   }));
 }
 
+function applyPreparedAudioMetadata(tracks, options = {}) {
+  if (!Array.isArray(tracks) || !(options.cookie || options.refreshToken || options.accessToken)) return tracks;
+  return tracks.map(track => {
+    const prepared = getCachedStreamResolution(`${track.id}:${getAuthCacheKey(options)}`);
+    if (!prepared) return track;
+
+    const duration = track.duration || prepared.duration || 0;
+    return {
+      ...track,
+      duration,
+      durationMs: duration ? duration * 1000 : (prepared.durationMs || 0),
+      contentType: prepared.contentType || track.contentType,
+      contentLength: prepared.contentLength || track.contentLength,
+      format: prepared.format || track.format,
+    };
+  });
+}
+
 function proxiedPlaybackResult(req, result) {
   const token = setProxiedUrl(result);
   const sessionBasePath = getSessionBasePath(req);
@@ -1562,8 +1580,9 @@ app.get(['/u/:sessionId/search', '/ytmusic/u/:sessionId/search'], async (req, re
 
   try {
     const options = getSessionOptions(req);
-    const tracks = await searchYTMusicWithFallback(query, 20, options);
+    let tracks = await searchYTMusicWithFallback(query, 20, options);
     await prepareDirectAudioForTracks(tracks, options);
+    tracks = applyPreparedAudioMetadata(tracks, options);
     warmDirectAudioForTracks(tracks, options);
     res.json({ tracks: withStreamUrls(req, tracks) });
   } catch (e) {
@@ -1652,6 +1671,7 @@ app.get(['/u/:sessionId/album/:id', '/ytmusic/u/:sessionId/album/:id'], async (r
     const options = getSessionOptions(req);
     const album = await getAlbum(albumId, options);
     await prepareDirectAudioForTracks(album.tracks, options);
+    album.tracks = applyPreparedAudioMetadata(album.tracks, options);
     warmDirectAudioForTracks(album.tracks, options);
     album.tracks = withStreamUrls(req, album.tracks);
     res.json(album);
