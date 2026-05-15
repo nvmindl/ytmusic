@@ -897,10 +897,12 @@ function setCachedStreamFailure(cacheKey, error) {
 async function validateAudioResult(result) {
   const response = await fetch(result.url, {
     headers: { Range: 'bytes=0-0' },
-    signal: AbortSignal.timeout(3000),
+    signal: AbortSignal.timeout(8000),
   });
   const contentType = response.headers.get('content-type') || result.contentType || '';
   const contentLength = Number(response.headers.get('content-length') || 0);
+  const contentRange = response.headers.get('content-range') || '';
+  const rangeLength = Number(contentRange.match(/\/(\d+)$/)?.[1] || 0);
   if (response.body?.cancel) response.body.cancel().catch(() => {});
   if (!response.ok && response.status !== 206) {
     throw new Error(`Candidate audio URL failed: HTTP ${response.status}`);
@@ -911,7 +913,12 @@ async function validateAudioResult(result) {
   if (contentLength > 0 && contentLength < 32) {
     throw new Error(`Candidate audio URL is too small (${contentLength} bytes)`);
   }
-  return result;
+  return {
+    ...result,
+    url: response.url || result.url,
+    contentType: contentType || result.contentType,
+    contentLength: rangeLength || result.contentLength || contentLength || undefined,
+  };
 }
 
 async function resolveProxyAudio(videoId, options = {}) {
@@ -973,6 +980,7 @@ function warmDirectAudio(videoId, options = {}) {
     ...options,
     directOnly: true,
   })
+    .then(validateAudioResult)
     .then(result => {
       setCachedStreamResolution(cacheKey, result);
       return result;
@@ -1009,6 +1017,7 @@ async function prepareDirectAudioForTracks(tracks, options = {}, limit = 3) {
       ...options,
       directOnly: true,
     })
+      .then(validateAudioResult)
       .then(result => {
         setCachedStreamResolution(cacheKey, result);
         return result;
@@ -1060,7 +1069,7 @@ async function resolvePlaybackForEclipse(req, videoId, options = {}) {
       const direct = getCachedStreamResolution(cacheKey) || await resolveStream(videoId, 'high', {
         ...options,
         directOnly: true,
-      });
+      }).then(validateAudioResult);
       setCachedStreamResolution(cacheKey, direct);
       if (process.env.RETURN_DIRECT_AUDIO_URLS === '1' || req.query.direct === '1') {
         console.log('[stream]', videoId, 'returning direct audio URL');
