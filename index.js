@@ -164,6 +164,7 @@ function withStreamUrls(req, tracks) {
     return {
       ...track,
       streamURL: hls.url,
+      streamUrl: hls.streamUrl || hls.url,
       format: 'aac',
       contentType: 'application/vnd.apple.mpegurl',
       duration: track.duration || hls.duration || 0,
@@ -1036,10 +1037,13 @@ async function resolveHlsAudio(videoId, options = {}) {
       throw new Error('No HLS manifest returned');
     }
 
-    const audioOnlyUrl = await getAudioOnlyHlsUrl(hls.url);
+    const streamUrl = process.env.HLS_AUDIO_ONLY === '1'
+      ? await getAudioOnlyHlsUrl(hls.url)
+      : hls.url;
     const result = {
       ...hls,
-      url: audioOnlyUrl,
+      url: streamUrl,
+      streamUrl,
       format: 'aac',
       contentType: 'application/vnd.apple.mpegurl',
       quality: '128kbps',
