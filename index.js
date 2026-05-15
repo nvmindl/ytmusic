@@ -292,13 +292,14 @@ async function exchangeRefreshTokenViaIssueToken(refreshToken, hl = 'en') {
     access_token: accessToken,
     expires_in: Number(data.expires_in || data.expiresIn || 3600),
     token_type: data.token_type || data.tokenType || 'Bearer',
-    scope: data.scope || YOUTUBE_SCOPE,
+    scope: data.scope || data.grantedScopes || ISSUE_TOKEN_SCOPE,
   };
 }
 
 async function refreshAccessToken(session, force = false) {
   if (!session?.refreshToken) return null;
-  if (!force && session.accessToken && session.accessTokenExpiresAt > (Date.now() + 60_000)) {
+  const hasExpectedIssueTokenScope = session.tokenSource !== 'issuetoken' || session.accessTokenScope === ISSUE_TOKEN_SCOPE;
+  if (!force && hasExpectedIssueTokenScope && session.accessToken && session.accessTokenExpiresAt > (Date.now() + 60_000)) {
     return session.accessToken;
   }
 
@@ -314,6 +315,7 @@ async function refreshAccessToken(session, force = false) {
 
   session.accessToken = data.access_token;
   session.accessTokenExpiresAt = Date.now() + (Number(data.expires_in || 3600) * 1000);
+  session.accessTokenScope = data.scope || ISSUE_TOKEN_SCOPE;
   session.lastUsedAt = Date.now();
   saveCookieSessions();
   return session.accessToken;
